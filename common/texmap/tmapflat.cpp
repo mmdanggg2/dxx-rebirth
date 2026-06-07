@@ -34,7 +34,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "compiler-range_for.h"
 #include "partial_range.h"
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 #include "3d.h"
 #include "dxxerror.h"
 #include "d_zip.h"

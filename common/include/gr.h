@@ -109,6 +109,8 @@ public:
 	struct grs_bitmap  *bm_parent{};
 #if DXX_USE_OGL
 	struct ogl_texture *gltexture{};
+#elif DXX_USE_VULKAN
+	struct vks_texture *vktexture{};
 #else
 	uint8_t avg_color;  //  Average color of all pixels in texture map.
 #endif /* def OGL */
@@ -127,6 +129,8 @@ public:
 		r.bm_data = nullptr;
 #if DXX_USE_OGL
 		r.gltexture = nullptr;
+#elif DXX_USE_VULKAN
+		r.vktexture = nullptr;
 #endif
 	}
 	grs_main_bitmap &operator=(grs_main_bitmap &&r)
@@ -138,6 +142,8 @@ public:
 		r.bm_data = nullptr;
 #if DXX_USE_OGL
 		r.gltexture = nullptr;
+#elif DXX_USE_VULKAN
+		r.vktexture = nullptr;
 #endif
 		return *this;
 	}

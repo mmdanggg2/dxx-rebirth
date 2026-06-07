@@ -239,7 +239,7 @@ void compute_y_bounds(const g3ds_tmap &t, int &vlt, int &vlb, int &vrt, int &vrb
 //--
 //--}
 
-//#if !DXX_USE_OGL
+//#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static fix compute_du_dy_lin(const g3ds_tmap &t, int top_vertex,int bottom_vertex, fix recip_dy)
 {
 	return fixmul(t.verts[bottom_vertex].u - t.verts[top_vertex].u, recip_dy);

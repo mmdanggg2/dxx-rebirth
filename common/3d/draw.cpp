@@ -16,7 +16,7 @@
 #include "3d.h"
 #include "globvars.h"
 #include "texmap.h"
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 #include "clipper.h"
 #include "gr.h"
 #endif
@@ -47,7 +47,30 @@ g3_draw_line_colors::g3_draw_line_colors(const color_palette_index color) :
 	color_array{build_color_array_from_color_palette_index(color)}
 {
 }
-#else
+#elif DXX_USE_VULKAN
+namespace {
+
+static const std::array<float, 8> build_color_array_from_color_palette_index(const color_palette_index color)
+{
+	auto &&rgb{PAL2T(color)};
+	const float color_r{rgb.r / 63.0f};
+	const float color_g{rgb.g / 63.0f};
+	const float color_b{rgb.b / 63.0f};
+	return {{
+		color_r, color_g, color_b, 1.0f,
+		color_r, color_g, color_b, 1.0f,
+	}};
+}
+
+}
+
+g3_draw_line_colors::g3_draw_line_colors(const color_palette_index color) :
+	color_array{build_color_array_from_color_palette_index(color)}
+{
+}
+#endif
+
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 namespace {
 
 //deal with a clipped line
@@ -109,7 +132,7 @@ bool do_facing_check(const std::array<g3_draw_tmap_point *, 3> &vertlist)
 		return (vm_vec_build_dot(tempv,vertlist[1]->p3_vec) < 0);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 namespace {
 
 static void must_clip_tmap_face(grs_canvas &, std::size_t nv, g3s_codes cc, grs_bitmap &bm, polygon_clip_points &Vbuf0, polygon_clip_points &Vbuf1, tmap_drawer_type tmap_drawer_ptr);

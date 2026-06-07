@@ -283,13 +283,13 @@ grs_bitmap &texmerge_get_cached_bitmap(GameBitmaps_array &GameBitmaps, const Tex
 	{
 		merge_textures<merge_transform_super_xparent>(expanded_bottom_bmp.bm_w, expanded_top_bmp.bm_data, expanded_bottom_bmp.bm_data, mb.get_bitmap_data(), orient);
 		gr_set_bitmap_flags(mb, BM_FLAG_TRANSPARENT);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 		mb.avg_color = bitmap_top.avg_color;
 #endif
 	} else	{
 		merge_textures<merge_transform_new>(expanded_bottom_bmp.bm_w, expanded_top_bmp.bm_data, expanded_bottom_bmp.bm_data, mb.get_bitmap_data(), orient);
 		mb.set_flags(bitmap_bottom.get_flag_mask(~BM_FLAG_RLE));
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 		mb.avg_color = bitmap_bottom.avg_color;
 #endif
 	}

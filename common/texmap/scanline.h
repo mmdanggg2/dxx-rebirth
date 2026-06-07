@@ -29,7 +29,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <string>
 #include "dxxsconf.h"
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 namespace dcx {
 extern void c_tmap_scanline_lin();
 extern void c_tmap_scanline_lin_nolight();

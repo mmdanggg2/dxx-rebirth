@@ -337,7 +337,9 @@ static DiskBitmapHeader DiskBitmapHeader_read(const NamedPHYSFS_File fp)
 	dbh.wh_extra = PHYSFSX_readByte(fp);
 #endif
 	dbh.flags = PHYSFSX_readByte(fp);
+	#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	dbh.avg_color = PHYSFSX_readByte(fp);
+	#endif
 	dbh.offset = PHYSFSX_readInt(fp);
 	return dbh;
 }
@@ -354,7 +356,9 @@ static DiskBitmapHeader DiskBitmapHeader_d1_read(const NamedPHYSFS_File fp)
 	dbh.width = PHYSFSX_readByte(fp);
 	dbh.height = PHYSFSX_readByte(fp);
 	dbh.flags = PHYSFSX_readByte(fp);
+	#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	dbh.avg_color = PHYSFSX_readByte(fp);
+	#endif
 	dbh.offset = PHYSFSX_readInt(fp);
 	return dbh;
 }
@@ -669,7 +673,7 @@ properties_init_result properties_init(d_level_shared_robot_info_state &LevelSha
 			iwidth, bmh.height,
 			iwidth, Piggy_bitmap_cache_data);
 		temp_bitmap.add_flags(BM_FLAG_PAGED_OUT);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 		temp_bitmap.avg_color = bmh.avg_color;
 #endif
 
@@ -807,7 +811,7 @@ void piggy_init_pigfile(const std::span<const char> filename)
 		width = bmh.width + (static_cast<short>(bmh.wh_extra & 0x0f) << 8);
 		gr_init_bitmap(*bm, bm_mode::linear, 0, 0, width, bmh.height + (static_cast<short>(bmh.wh_extra & 0xf0) << 4), width, NULL);
 		bm->set_flags(BM_FLAG_PAGED_OUT);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 		bm->avg_color = bmh.avg_color;
 #endif
 
@@ -935,7 +939,7 @@ void piggy_new_pigfile(const std::span<char, FILENAME_LEN> pigname)
 			gr_set_bitmap_data(*bm, NULL);	// free ogl texture
 			gr_init_bitmap(*bm, bm_mode::linear, 0, 0, width, bmh.height + (static_cast<short>(bmh.wh_extra & 0xf0) << 4), width, NULL);
 			bm->set_flags(BM_FLAG_PAGED_OUT);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 			bm->avg_color = bmh.avg_color;
 #endif
 
@@ -986,7 +990,7 @@ void piggy_new_pigfile(const std::span<char, FILENAME_LEN> pigname)
 
 					gr_remap_bitmap_good(*bm[fnum].get(), newpal, iff_has_transparency ? iff_transparent_color : -1, SuperX);
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 					bm[fnum]->avg_color = compute_average_pixel(bm[fnum].get());
 #endif
 
@@ -1029,7 +1033,7 @@ void piggy_new_pigfile(const std::span<char, FILENAME_LEN> pigname)
 
 				gr_remap_bitmap_good(n, newpal, iff_has_transparency ? iff_transparent_color : -1, SuperX);
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 				n.avg_color = compute_average_pixel(&n);
 #endif
 
@@ -1549,7 +1553,9 @@ static void piggy_write_pigfile(const std::span<const char, FILENAME_LEN> filena
 		} else {
 			bmh.flags &= ~BM_FLAG_PAGED_OUT;
 		}
+		#if !DXX_USE_OGL && !DXX_USE_VULKAN
 		bmh.avg_color = compute_average_pixel(&GameBitmaps[bi]);
+		#endif
 		PHYSFSX_writeBytes(pig_fp, &bmh, sizeof(DiskBitmapHeader));	// Mark as a bitmap
 	}
 	PHYSFSX_printf( fp1, " Dumped %d assorted bitmaps.\n", Num_bitmap_files );
@@ -1744,7 +1750,7 @@ void load_bitmap_replacements(const std::span<const char, FILENAME_LEN> level_na
 			width = bmh.width + (static_cast<short>(bmh.wh_extra & 0x0f) << 8);
 			gr_set_bitmap_data(*bm, NULL);	// free ogl texture
 			gr_init_bitmap(*bm, bm_mode::linear, 0, 0, width, bmh.height + (static_cast<short>(bmh.wh_extra & 0xf0) << 4), width, NULL);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 			bm->avg_color = bmh.avg_color;
 #endif
 			bm->bm_data = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(bmh.offset));
@@ -1828,7 +1834,7 @@ static std::span<uint8_t> bitmap_read_d1(grs_bitmap *bitmap, /* read into this b
 	width = bmh->width + (static_cast<short>(bmh->wh_extra & 0x0f) << 8);
 	gr_set_bitmap_data(*bitmap, NULL);	// free ogl texture
 	gr_init_bitmap(*bitmap, bm_mode::linear, 0, 0, width, bmh->height + (static_cast<short>(bmh->wh_extra & 0xf0) << 4), width, NULL);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	bitmap->avg_color = bmh->avg_color;
 #endif
 	gr_set_bitmap_flags(*bitmap, bmh->flags & BM_FLAGS_TO_COPY);
@@ -2226,7 +2232,7 @@ grs_bitmap *read_extra_bitmap_d1_pig(const std::span<const char> name, grs_bitma
 		}
 	}
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	n.avg_color = 0;	//compute_average_pixel(n);
 #endif
 	return &n;

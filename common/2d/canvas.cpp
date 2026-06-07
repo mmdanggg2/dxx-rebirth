@@ -24,6 +24,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gr.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include <memory>
 
@@ -115,6 +117,8 @@ void gr_settransblend(grs_canvas &canvas, const gr_fade_level fade_level, const 
 	canvas.cv_fade_level = fade_level;
 #if DXX_USE_OGL
 	ogl_set_blending(blend_func);
+#elif DXX_USE_VULKAN
+	(void)blend_func;
 #endif
 }
 

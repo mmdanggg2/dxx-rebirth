@@ -23,7 +23,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 namespace dcx {
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 int gr_ucircle(grs_canvas &canvas, const fix xc1, const fix yc1, const fix r1, const color_palette_index color)
 {
 	int p,x, y, xc, yc, r;

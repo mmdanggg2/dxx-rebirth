@@ -48,6 +48,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "config.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 #include "compiler-range_for.h"
@@ -354,7 +356,7 @@ static int gr_internal_string0m(grs_canvas &canvas, const grs_font &cv_font, con
 	return gr_internal_string0_template<false>(canvas, cv_font, x, y, s);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_internal_color_string(grs_canvas &canvas, const grs_font &cv_font, const int x, const int y, const char *const s)
 {
 //a bitmap for the character
@@ -417,7 +419,7 @@ static void gr_internal_color_string(grs_canvas &canvas, const grs_font &cv_font
 	}
 }
 
-#else //OGL
+#elif DXX_USE_OGL
 
 static unsigned get_font_total_width(const grs_font &font)
 {
@@ -681,7 +683,104 @@ static void ogl_internal_string(grs_canvas &canvas, const grs_font &cv_font, con
 }
 
 #define gr_internal_color_string ogl_internal_string
-#endif //OGL
+#endif // OGL
+
+#if DXX_USE_VULKAN
+static unsigned vks_font_get_total_width(const grs_font &font)
+{
+	if (font.ft_flags & FT_PROPORTIONAL)
+	{
+		unsigned w{};
+		range_for (const auto v, unchecked_partial_range(font.ft_widths, static_cast<unsigned>(font.ft_maxchar - font.ft_minchar) + 1))
+			w += v;
+		return w;
+	}
+	else
+	{
+		return {unsigned{font.ft_w} * (font.ft_maxchar - font.ft_minchar + 1u)};
+	}
+}
+
+[[maybe_unused]] static std::pair<unsigned, unsigned> vks_font_choose_size(const grs_font *const font, const uint8_t gap)
+{
+	const auto nchars{font->ft_maxchar - font->ft_minchar + 1u};
+	int nc{}, smallest{999999};
+	int smallprop{10000};
+	std::optional<std::pair<unsigned, unsigned>> rwh;
+	for (unsigned h{32}; h <= 256; h *= 2)
+	{
+		if (font->ft_h > h) continue;
+		const auto r{h / (font->ft_h + gap)};
+		auto w{std::bit_ceil((vks_font_get_total_width(*font) + (nchars - r) * gap) / r)};
+		int tries{};
+		do {
+			if (tries)
+				w = std::bit_ceil(w + 1u);
+			if (tries > 3)
+				break;
+			nc = 0;
+			int y{};
+			while (y + font->ft_h <= h) {
+				int x{};
+				while (x < w) {
+					if (nc == nchars)
+						break;
+					if (font->ft_flags & FT_PROPORTIONAL) {
+						if (x + font->ft_widths[nc] + gap > w) break;
+						x += font->ft_widths[nc++] + gap;
+					} else {
+						if (x + font->ft_w + gap > w) break;
+						x += font->ft_w + gap;
+						nc++;
+					}
+				}
+				if (nc == nchars)
+					break;
+				y += font->ft_h + gap;
+			}
+			tries++;
+		} while (nc != nchars);
+		if (nc != nchars)
+			continue;
+		const auto whproduct{w * h};
+		if (whproduct == smallest)
+		{
+			if (w >= h) {
+				if (w / h < smallprop) {
+					smallprop = w / h;
+					smallest++;
+				}
+			} else {
+				if (h / w < smallprop) {
+					smallprop = h / w;
+					smallest++;
+				}
+			}
+		}
+		if (whproduct < smallest)
+		{
+			smallest = whproduct;
+			rwh = {w, h};
+		}
+	}
+	if (!rwh)
+		Error("Could not fit font?\n");
+	return *rwh;
+}
+
+static void vks_init_font(grs_font *const /*font*/)
+{
+	/* Vulkan font initialization — stub. Actual font texture management
+	 * is handled by the Vulkan renderer via dcx::vks_* functions. */
+}
+
+static void vks_internal_string_fn(grs_canvas &canvas, const grs_font &cv_font, const int entry_x, int yy, const char *const s)
+{
+	vks_internal_string(canvas, cv_font, entry_x, yy, s);
+}
+
+#define gr_internal_color_string vks_internal_string_fn
+#endif // VULKAN
 
 static grs_disk_font grs_disk_font_read(NamedPHYSFS_File fp)
 {
@@ -728,6 +827,9 @@ static void gr_ustring_mono(grs_canvas &canvas, const grs_font &cv_font, const i
 #if DXX_USE_OGL
 		case bm_mode::ogl:
 #endif
+#if DXX_USE_VULKAN
+		case bm_mode::vulkan:
+#endif
 			break;
 	}
 }
@@ -756,6 +858,8 @@ void gr_string(grs_canvas &canvas, const grs_font &cv_font, const int x, const i
 	if (
 #if DXX_USE_OGL
 		canvas.cv_bitmap.get_type() == bm_mode::ogl ||
+#elif DXX_USE_VULKAN
+		canvas.cv_bitmap.get_type() == bm_mode::vulkan ||
 #endif
 		cv_font.ft_flags & FT_COLOR)
 	{
@@ -786,6 +890,12 @@ void gr_ustring(grs_canvas &canvas, const grs_font &cv_font, const int x, const 
 	if (canvas.cv_bitmap.get_type() == bm_mode::ogl)
 	{
 		ogl_internal_string(canvas, cv_font, x, y, s);
+		return;
+	}
+#elif DXX_USE_VULKAN
+	if (canvas.cv_bitmap.get_type() == bm_mode::vulkan)
+	{
+		vks_internal_string(canvas, cv_font, x, y, s);
 		return;
 	}
 #endif
@@ -1068,6 +1178,8 @@ grs_font_ptr gr_init_font(grs_canvas &canvas, const std::span<const char> fontna
 	canvas.cv_font_bg_color    = 0;
 #if DXX_USE_OGL
 	ogl_init_font(font.get());
+#elif DXX_USE_VULKAN
+	vks_init_font(font.get());
 #endif
 	return grs_font_ptr(font.release());
 }
@@ -1095,6 +1207,8 @@ void gr_remap_font(grs_font *font)
 	*font = std::move(*n.get());
 #if DXX_USE_OGL
 	ogl_init_font(font);
+#elif DXX_USE_VULKAN
+	vks_init_font(font);
 #endif
 }
 

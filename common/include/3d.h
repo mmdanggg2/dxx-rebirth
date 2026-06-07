@@ -42,6 +42,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #else
 #include <GL/gl.h>
 #endif
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -87,7 +89,7 @@ enum class projection_flag : uint8_t
 	//flags for point structure
 	projected = 1,		//has been projected, so sx,sy valid
 	overflow = 2,		//can't project
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	temp_point = 4,	//created during clip
 	uvs = 8,			//has uv values set
 	ls = 16,			//has lighting values set
@@ -137,7 +139,7 @@ protected:
  */
 struct g3_projected_point
 {
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	fix p3_u, p3_v, p3_l; //u,v,l coords
 #endif
 	fix p3_sx, p3_sy;    //screen x&y
@@ -148,7 +150,7 @@ struct g3_projected_point
 protected:
 	static g3_projected_point build(const g3_rotated_point &p);
 	g3_projected_point() = default;
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	g3_projected_point(const vms_vector &relative_position, g3_rotated_point::from_relative_position rel);
 #endif
 };
@@ -158,7 +160,7 @@ struct g3s_point : g3_rotated_point, g3_projected_point
 	g3s_point(const g3_instance_context &viewer, const vms_vector &absolute_position);
 	explicit g3s_point(const g3_rotated_point &);
 	g3s_point() = default;
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	g3s_point(const vms_vector &relative_position, from_relative_position rel);
 #endif
 };
@@ -180,7 +182,7 @@ struct g3s_reusable_point : g3s_point
 	g3s_reusable_point() = default;
 };
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 using g3_draw_line_point = const g3_rotated_point;
 using g3_draw_sphere_point = const g3_rotated_point;
 using g3_draw_tmap_point = const g3_rotated_point;	// also applies to g3_draw_poly
@@ -204,6 +206,8 @@ void g3_set_view_matrix(const vms_vector &view_pos,const vms_matrix &view_matrix
 //end the frame
 #if DXX_USE_OGL
 #define g3_end_frame() ogl_end_frame()
+#elif DXX_USE_VULKAN
+#define g3_end_frame() vks_end_frame()
 #else
 #define g3_end_frame()
 #endif
@@ -285,7 +289,7 @@ constexpr std::integral_constant<std::size_t, 64> MAX_POINTS_PER_POLY{};
 //radius, but not to the distance from the eye
 void g3_draw_sphere(grs_canvas &, g3_draw_sphere_point &pnt, fix rad, uint8_t color);
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static inline void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &&pnt, fix rad, uint8_t color)
 {
 	g3_draw_sphere(canvas, pnt, rad, color);
@@ -319,16 +323,16 @@ static inline void g3_check_and_draw_poly(grs_canvas &canvas, const std::array<g
 //returns 1 if off screen, 0 if drew
 void g3_draw_bitmap(grs_canvas &, const vms_vector &pos, fix width, fix height, grs_bitmap &bm);
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 struct g3_draw_line_colors
 {
-	const std::array<GLfloat, 8> color_array;
+	const std::array<float, 8> color_array;
 	g3_draw_line_colors(color_palette_index color);
 };
 #endif
 
 class g3_draw_line_context
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	: public g3_draw_line_colors
 #endif
 {
@@ -336,7 +340,7 @@ public:
 	grs_canvas &canvas;
 	const color_palette_index color;
 	g3_draw_line_context(grs_canvas &canvas, color_palette_index color) :
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 		g3_draw_line_colors{color},
 #endif
 		canvas{canvas}, color{color}

@@ -218,6 +218,8 @@ void MovieShowFrame(const uint8_t *buf, int dstx, int dsty, int bufw, int bufh, 
 		bufw, bufh, 0, 0, source_bm, grd_curcanv->cv_bitmap, (GameCfg.MovieTexFilt) ? opengl_texture_filter::trilinear : opengl_texture_filter::classic);
 
 	glEnable (GL_BLEND);
+#elif DXX_USE_VULKAN
+	vks_ubitblt(bufw*scale, bufh*scale, dstx, dsty, 0, 0, source_bm, grd_curcanv->cv_bitmap);
 #else
 	gr_bm_ubitbltm(*grd_curcanv, bufw, bufh, dstx, dsty, 0, 0, source_bm);
 #endif

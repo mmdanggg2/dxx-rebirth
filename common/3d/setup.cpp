@@ -20,6 +20,8 @@
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #else
 #include "texmap.h"  // for init_interface_vars_to_assembler()
 #endif
@@ -59,6 +61,8 @@ void g3_start_frame(grs_canvas &canvas)
 
 #if DXX_USE_OGL
 	ogl_start_frame(canvas);
+#elif DXX_USE_VULKAN
+	vks_start_frame(canvas);
 #else
 	init_interface_vars_to_assembler();		//for the texture-mapper
 #endif
@@ -70,6 +74,8 @@ void g3_stereo_frame(const int xeye, const int xoff)
 {
 #if DXX_USE_OGL
 	ogl_stereo_frame(xeye < 0, xoff);
+#elif DXX_USE_VULKAN
+	vks_stereo_frame(xeye < 0, xoff);
 #else
 	(void)xeye;
 	(void)xoff;

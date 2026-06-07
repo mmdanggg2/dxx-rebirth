@@ -27,6 +27,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -37,6 +39,12 @@ void gr_urect(grs_canvas &canvas, const int left, const int top, const int right
 	if (canvas.cv_bitmap.get_type() == bm_mode::ogl)
 	{
 		ogl_urect(canvas, left, top, right, bot, color);
+		return;
+	}
+#elif DXX_USE_VULKAN
+	if (canvas.cv_bitmap.get_type() == bm_mode::vulkan)
+	{
+		vks_urect(canvas, left, top, right, bot, color);
 		return;
 	}
 #else
@@ -51,6 +59,12 @@ void gr_rect(grs_canvas &canvas, const int left, const int top, const int right,
 	if (canvas.cv_bitmap.get_type() == bm_mode::ogl)
 	{
 		ogl_urect(canvas, left, top, right, bot, color);
+		return;
+	}
+#elif DXX_USE_VULKAN
+	if (canvas.cv_bitmap.get_type() == bm_mode::vulkan)
+	{
+		vks_urect(canvas, left, top, right, bot, color);
 		return;
 	}
 #endif

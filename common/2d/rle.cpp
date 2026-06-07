@@ -105,7 +105,7 @@ uint8_t *gr_rle_decode(const color_palette_index *sb, color_palette_index *db, c
 	return db;
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 // Given pointer to start of one scanline of rle data, uncompress it to
 // dest, from source pixels x1 to x2.
 void gr_rle_expand_scanline_masked(uint8_t *dest, const uint8_t *src, const uint_fast32_t x1, const uint_fast32_t x2)
@@ -450,7 +450,7 @@ grs_bitmap *_rle_expand_texture(const grs_bitmap &bmp)
 	return least_recently_used->expanded_bitmap.get();
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 void gr_rle_expand_scanline_generic(grs_canvas &canvas, grs_bitmap &dest, int dx, const int dy, const uint8_t *src, const int x1, const int x2)
 {
 	int i{0};

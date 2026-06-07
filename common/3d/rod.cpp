@@ -14,13 +14,13 @@
 #include "3d.h"
 #include "globvars.h"
 #include "maths.h"
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 #include "gr.h"
 #endif
 
 namespace dcx {
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 g3_projected_point::g3_projected_point(const vms_vector &relative_position, g3_rotated_point::from_relative_position) :
 	p3_codes{build_g3_clipping_code_from_viewer_relative_position(relative_position)},
 	p3_flags{}
@@ -38,7 +38,7 @@ namespace {
 
 struct rod_corners_result
 {
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	using g3_rod_corner_point = g3_rotated_point;
 #else
 	using g3_rod_corner_point = g3s_point;
@@ -63,7 +63,7 @@ clipping_code rod_corners_result::build_clipping_code(const std::array<g3_rod_co
 	clipping_code codes_and{0xff};
 	for (auto &i : points)
 		codes_and &= (
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 			/* In the OpenGL build, the per-point code is not computed above
 			 * because `g3_rotated_point` does not need it and has nowhere to
 			 * store it.  Compute it now, and use it immediately.
@@ -145,7 +145,7 @@ void g3_draw_rod_tmap(grs_canvas &canvas, grs_bitmap &bitmap, const g3_rotated_p
 	}}, uvl_list, lrgb_list, bitmap, tmap_drawer_ptr);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 //draws a bitmap with the specified 3d width & height 
 void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, fix width, fix height, grs_bitmap &bm)
 {

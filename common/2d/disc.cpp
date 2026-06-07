@@ -15,7 +15,7 @@
 
 namespace dcx {
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 int gr_disk(grs_canvas &canvas, const fix xc1, const fix yc1, const fix r1, const uint8_t color)
 {
 	int p,x, y, xc, yc, r;

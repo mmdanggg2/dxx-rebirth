@@ -93,6 +93,8 @@ enum class bm_mode : uint8_t
 	rgb15 = 3,	//5 bits each r,g,b stored at 16 bits
 #if DXX_USE_OGL
 	ogl = 5,
+#elif DXX_USE_VULKAN
+	vulkan = 5,
 #endif /* def OGL */
 };
 
@@ -193,7 +195,7 @@ grs_subbitmap_ptr gr_create_sub_bitmap(grs_bitmap &bm, uint16_t x, uint16_t y, u
 
 // Free the bitmap's data
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 void gr_bm_ubitblt(grs_canvas &dest, unsigned w, unsigned h, int dx, int dy, int sx, int sy, const grs_bitmap &src);
 void gr_bm_ubitbltm(grs_canvas &dest, unsigned w, unsigned h, unsigned dx, unsigned dy, unsigned sx, unsigned sy, const grs_bitmap &src);
 #define gr_bm_pixel(C,B,X,Y,C2) gr_bm_pixel(B,X,Y,C2)
@@ -268,7 +270,7 @@ void gr_box(grs_canvas &, uint_fast32_t left,uint_fast32_t top,uint_fast32_t rig
 void gr_ubox(grs_canvas &, int left,int top,int right,int bot, color_palette_index color);
 
 void gr_scanline(grs_canvas &canvas, int x1, int x2, unsigned y, color_palette_index color);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 void gr_uscanline(grs_canvas &canvas, unsigned x1, unsigned x2, unsigned y, color_palette_index color);
 #endif
 

@@ -326,7 +326,7 @@ static int load_pigpog(const d_fname &pogname)
 			*bmp = {};
 			gr_init_bitmap(*bmp, bm_mode::linear, 0, 0, cip->width, cip->height, cip->width, p);
 			gr_set_bitmap_flags(*bmp, cip->flags & 255);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 			bmp->avg_color = cip->flags >> 8;
 #endif
 

@@ -72,4 +72,9 @@ void ogl_swap_buffers_internal();
 #endif
 }
 
+#elif DXX_USE_VULKAN
+namespace dcx {
+extern unsigned last_width,last_height;
+}
+
 #endif

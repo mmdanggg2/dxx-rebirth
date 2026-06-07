@@ -1478,8 +1478,20 @@ int main(int argc,char**argv)
 		Result(f'''{self.msgprefix}: building with {
 			"OpenGL ES" if user_settings.opengles else
 			"OpenGL" if user_settings.opengl else
+			"Vulkan" if user_settings.vulkan else
 			"software renderer"
 }''')
+
+	@_custom_test
+	def _check_user_settings_vulkan(self,context):
+		user_settings = self.user_settings
+		Result = context.Result
+		_define_macro = self._define_macro
+		if user_settings.vulkan and (user_settings.opengl or user_settings.opengles):
+			Result('ERROR: Vulkan and OpenGL/OpenGL ES are mutually exclusive. Set opengl=0 or opengles=0 to enable Vulkan.')
+			raise SCons.Errors.StopError('Vulkan and OpenGL/OpenGL ES are mutually exclusive.')
+		_define_macro(context, 'DXX_USE_VULKAN', int(user_settings.vulkan))
+		Result(f'{self.msgprefix}: building with {"Vulkan" if user_settings.vulkan else "no Vulkan renderer"}')
 
 	def _result_check_user_setting(self, context, condition, label, cpp_defines_if_enabled: typing.Optional[tuple[tuple]]=None, cpp_defines_with_condition_value: typing.Optional[tuple[str]]=None, int=int):
 		assert cpp_defines_if_enabled or cpp_defines_with_condition_value
@@ -1557,7 +1569,7 @@ struct d_screenshot
 	pt.second = 1;
 	png_set_tIME(ss.png_ptr, ss.info_ptr, &pt);
 #endif
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	const auto color_type{PNG_COLOR_TYPE_RGB};
 #else
 	png_set_PLTE(ss.png_ptr, ss.info_ptr, reinterpret_cast<const png_color *>(&ss), 256 * 3);
@@ -1774,8 +1786,8 @@ static void terminate_handler()
 	def check_libSDL2(self,context,_guess_flags={
 			'LIBS' : ['SDL2'] if sys.platform != 'darwin' else [],
 		}):
-		if not self.user_settings.opengl:
-			raise SCons.Errors.StopError('Rebirth does not support SDL2 without OpenGL.  Set opengl=1 or sdl2=0.')
+		if not self.user_settings.opengl and not self.user_settings.vulkan:
+			raise SCons.Errors.StopError('Rebirth does not support SDL2 without OpenGL or Vulkan.  Set opengl=1 or vulkan=1 or sdl2=0.')
 		self._check_libSDL(context, '2', _guess_flags)
 
 	def _check_libSDL(self,context,sdl2,guess_flags):
@@ -3785,6 +3797,7 @@ class DXXCommon(LazyObjectConstructor):
 					('editor', 'ed'),
 					('opengl', 'ogl', 'sdl'),
 					('opengles', 'es'),
+					('vulkan', 'vks'),
 					('raspberrypi', 'rpi'),
 				)))
 				default_builddir = (builddir_prefix or '') + '-'.join([f for f in fields if f])
@@ -3986,6 +3999,7 @@ class DXXCommon(LazyObjectConstructor):
 					('memdebug', self.default_memdebug, 'build with malloc tracking'),
 					('opengl', True, 'build with OpenGL support'),
 					('opengles', self.default_opengles, 'build with OpenGL ES support'),
+					('vulkan', False, 'build with Vulkan support'),
 					('editor', False, 'include editor into build (!EXPERIMENTAL!)'),
 					('sdl2', self.default_sdl2, 'use libSDL2+SDL2_mixer (!EXPERIMENTAL!)'),
 					# Build with SDL_Image support for PCX file support
@@ -4281,6 +4295,7 @@ class DXXCommon(LazyObjectConstructor):
 	class _PlatformSettings:
 		tools = ('g++', 'gnulink')
 		ogllibs = []
+		vulkan_libs = ['vulkan']
 		platform_objects = ()
 		sharepath = None
 
@@ -4299,6 +4314,7 @@ class DXXCommon(LazyObjectConstructor):
 	# Settings to apply to mingw32 builds
 	class Win32PlatformSettings(_PlatformSettings):
 		ogllibs = ['opengl32', 'glu32']
+		vulkan_libs = ['vulkan-1']
 		tools = ('mingw',)
 		def adjust_environment(self,program,env):
 			env.Append(
@@ -5141,6 +5157,12 @@ class DXXArchive(DXXCommon):
 'common/arch/ogl/ogl_extensions.cpp',
 'common/arch/ogl/ogl_sync.cpp',
 ))
+	# for vulkan
+	get_objects_arch_vulkan = DXXCommon.create_lazy_object_getter((
+'common/arch/vulkan/vulkan_init.cpp',
+'common/arch/vulkan/vulkan_sync.cpp',
+'common/arch/vulkan/vulkan_textures.cpp',
+))
 	get_objects_arch_sdlmixer = DXXCommon.create_lazy_object_getter((
 'common/arch/sdl/digi_mixer_music.cpp',
 'common/arch/sdl/jukebox.cpp',
@@ -5348,6 +5370,13 @@ class DXXProgram(DXXCommon):
 		transform_target=_apply_target_name,
 	),
 	))
+	get_objects_similar_arch_vulkan = DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
+'similar/arch/vulkan/vk_render.cpp',
+'similar/arch/vulkan/vk_init.cpp',
+),
+			transform_target=_apply_target_name,
+		),
+		))
 	get_objects_similar_arch_sdlmixer = DXXCommon.create_lazy_object_states_getter((LazyObjectState(sources=(
 'similar/arch/sdl/digi_mixer.cpp',
 ),
@@ -5661,7 +5690,11 @@ class DXXProgram(DXXCommon):
 		if user_settings.sdlmixer:
 			objects.extend(static_archive_construction.get_objects_arch_sdlmixer())
 			objects.extend(self.get_objects_similar_arch_sdlmixer())
-		if user_settings.opengl or user_settings.opengles:
+		if user_settings.vulkan:
+			env.Append(LIBS = self.platform_settings.vulkan_libs)
+			static_objects_arch = static_archive_construction.get_objects_arch_vulkan
+			objects_similar_arch = self.get_objects_similar_arch_vulkan
+		elif user_settings.opengl or user_settings.opengles:
 			env.Append(LIBS = self.platform_settings.ogllibs)
 			static_objects_arch = static_archive_construction.get_objects_arch_ogl
 			objects_similar_arch = self.get_objects_similar_arch_ogl

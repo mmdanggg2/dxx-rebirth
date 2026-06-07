@@ -31,6 +31,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "clip.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -281,6 +283,11 @@ void gr_uline(grs_canvas &canvas, const fix _a1, const fix _b1, const fix _a2, c
 #if DXX_USE_OGL
 	case bm_mode::ogl:
 		ogl_ulinec(canvas, a1, b1, a2, b2, color);
+		return;
+#endif
+#if DXX_USE_VULKAN
+	case bm_mode::vulkan:
+		vks_ulinec(canvas, a1, b1, a2, b2, color);
 		return;
 #endif
 	case bm_mode::linear:

@@ -610,7 +610,7 @@ static int main(int argc, char *argv[])
 	 */
 	(void)arch_atexit_result;
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	select_tmap(CGameArg.DbgTexMap);
 
 #if DXX_BUILD_DESCENT == 2

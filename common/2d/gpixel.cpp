@@ -21,6 +21,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gr.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -40,6 +42,9 @@ color_palette_index gr_ugpixel(const grs_bitmap &bitmap, int x, int y)
 #if DXX_USE_OGL
 		case bm_mode::ogl:
 			return ogl_ugpixel(bitmap, x, y);
+#elif DXX_USE_VULKAN
+		case bm_mode::vulkan:
+			return vks_ugpixel(bitmap, x, y);
 #endif
 	}
 	return color_palette_index{0};

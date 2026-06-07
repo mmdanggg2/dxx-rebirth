@@ -12,7 +12,7 @@
 #include "dxxsconf.h"
 #include <cstdint>
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 #include "dsx-ns.h"
 #include "3d.h"
 #include "globvars.h"

@@ -32,6 +32,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "dxxerror.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "bitmap.h"
 #include <memory>
@@ -68,6 +70,8 @@ void gr_set_bitmap_data(grs_bitmap &bm, const uint8_t *data)
 {
 #if DXX_USE_OGL
 	ogl_freebmtexture(bm);
+#elif DXX_USE_VULKAN
+	vks_freebmtexture(bm);
 #endif
 	bm.bm_data = data;
 }
@@ -105,6 +109,9 @@ void gr_init_bitmap(grs_bitmap &bm, const bm_mode mode, const uint16_t x, const 
 #if DXX_USE_OGL
 	bm.bm_parent = nullptr;
 	bm.gltexture = nullptr;
+#elif DXX_USE_VULKAN
+	bm.bm_parent = nullptr;
+	bm.vktexture = nullptr;
 #endif
 }
 
@@ -139,6 +146,8 @@ void gr_free_bitmap_data (grs_bitmap &bm) // TODO: virtulize
 		d_free(d);
 #if DXX_USE_OGL
 	ogl_freebmtexture(bm);
+#elif DXX_USE_VULKAN
+	vks_freebmtexture(bm);
 #endif
 }
 
@@ -164,6 +173,8 @@ void gr_init_sub_bitmap(grs_bitmap &bm, grs_bitmap &bmParent, const uint16_t x, 
 
 #if DXX_USE_OGL
 	bm.gltexture = bmParent.gltexture;
+#elif DXX_USE_VULKAN
+	bm.vktexture = bmParent.vktexture;
 #endif
 	bm.bm_parent = &bmParent;
 	bm.bm_data = &bmParent.bm_data[static_cast<uint32_t>((y*bmParent.bm_rowsize)+x)];

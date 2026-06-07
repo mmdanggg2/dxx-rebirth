@@ -34,6 +34,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #if DXX_USE_OGL
 #include "fwd-gr.h"
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "fwd-gr.h"
+#include "vulkan_init.h"
 #endif
 
 #include "compiler-range_for.h"
@@ -45,14 +48,14 @@ namespace dcx {
 namespace {
 
 static void gr_bm_ubitblt00_rle(unsigned w, unsigned h, int dx, int dy, int sx, int sy, const grs_bitmap &src, grs_bitmap &dest);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_bm_ubitblt00m_rle(unsigned w, unsigned h, int dx, int dy, int sx, int sy, const grs_bitmap &src, grs_bitmap &dest);
 static void gr_bm_ubitblt0x_rle(grs_canvas &dest, unsigned w, unsigned h, int dx, int dy, int sx, int sy, const grs_bitmap &src);
 #endif
 
 #define gr_linear_movsd(S,D,L)	memcpy(D,S,L)
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_linear_rep_movsdm(uint8_t *const dest, const uint8_t *const src, const uint_fast32_t num_pixels)
 {
 	auto predicate = [&](uint8_t s, uint8_t d) {
@@ -82,7 +85,7 @@ static void gr_ubitmap00(grs_canvas &canvas, const unsigned x, const unsigned y,
 	gr_for_each_bitmap_line(canvas, x, y, bm, memcpy);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_ubitmap00m(grs_canvas &canvas, const unsigned x, const unsigned y, const grs_bitmap &bm)
 {
 	gr_for_each_bitmap_line(canvas, x, y, bm, gr_linear_rep_movsdm);
@@ -108,7 +111,7 @@ static void gr_ubitmap012(grs_canvas &canvas, const unsigned x, const unsigned y
 	gr_for_each_bitmap_byte(canvas, x, y, bm, a);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_ubitmap012m(grs_canvas &canvas, const unsigned x, const unsigned y, const grs_bitmap &bm)
 {
 	const auto a = [](grs_canvas &cv, const color_palette_index *const src, const uint_fast32_t px, const uint_fast32_t py) {
@@ -136,7 +139,7 @@ static void gr_ubitmapGENERIC(grs_canvas &canvas, const unsigned x, const unsign
 	}
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_ubitmapGENERICm(grs_canvas &canvas, const unsigned x, const unsigned y, const grs_bitmap &bm)
 {
 	const uint_fast32_t bm_h = bm.bm_h;
@@ -188,7 +191,7 @@ void gr_ubitmap(grs_canvas &canvas, grs_bitmap &bm)
 	}
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 void gr_ubitmapm(grs_canvas &canvas, const unsigned x, const unsigned y, grs_bitmap &bm)
 {
 	const auto source = bm.get_type();
@@ -287,6 +290,15 @@ void gr_bitmap(grs_canvas &canvas, const unsigned x, const unsigned y, grs_bitma
 	// Draw bitmap bm[x,y] into (dx1,dy1)-(dx2,dy2)
 #if DXX_USE_OGL
 	ogl_ubitmapm_cs(canvas, x, y, opengl_bitmap_use_src_bitmap, opengl_bitmap_use_src_bitmap, bm, ogl_colors::white);
+#elif DXX_USE_VULKAN
+	{
+		int sx{0}, sy{0};
+		if (dx1 < 0) { sx = -dx1; dx1 = 0; }
+		if (dy1 < 0) { sy = -dy1; dy1 = 0; }
+		if (dx2 >= canvas.cv_bitmap.bm_w) dx2 = canvas.cv_bitmap.bm_w - 1;
+		if (dy2 >= canvas.cv_bitmap.bm_h) dy2 = canvas.cv_bitmap.bm_h - 1;
+		vks_ubitblt(dx2 - dx1 + 1, dy2 - dy1 + 1, dx1, dy1, sx, sy, bm, canvas.cv_bitmap);
+	}
 #else
 	int sx{0}, sy = 0;
 	if ( dx1 < 0 )
@@ -308,7 +320,7 @@ void gr_bitmap(grs_canvas &canvas, const unsigned x, const unsigned y, grs_bitma
 #endif
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 void gr_bitmapm(grs_canvas &canvas, const unsigned x, const unsigned y, const grs_bitmap &bm)
 {
 	int dx1=x, dx2=x+bm.bm_w-1;
@@ -363,7 +375,7 @@ public:
 	void skip_upper_rows(uint_fast32_t);
 	uint8_t *init(uint_fast32_t dx, uint_fast32_t dy, uint_fast32_t sy, grs_bitmap &dest);
 	void apply(uint_fast32_t w, uint_fast32_t h, uint_fast32_t sx, uint8_t *dbits, uint_fast32_t bm_rowsize, auto &&f);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	using bm_rle_src_stride::src_bits;
 	using bm_rle_src_stride::advance_src_bits;
 #endif
@@ -397,7 +409,7 @@ static void gr_bm_ubitblt00_rle(const unsigned w, const unsigned h, const int dx
 	bw.apply(sx + w - 1, h, sx, bw.init(dx, dy, sy, dest), dest.bm_rowsize, gr_rle_expand_scanline);
 }
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 static void gr_bm_ubitblt00m_rle(const unsigned w, const unsigned h, const int dx, const int dy, const int sx, const int sy, const grs_bitmap &src, grs_bitmap &dest)
 {
 	bm_rle_window bw(src);
@@ -471,6 +483,13 @@ void show_fullscr(grs_canvas &canvas, grs_bitmap &bm, bool fill)
 		bm.bm_w <= grd_curscreen->get_screen_width() && bm.bm_h <= grd_curscreen->get_screen_height()) // only scale with OGL if bitmap is not bigger than screen size
 	{
 		ogl_ubitmapm_cs(canvas, 0, 0, opengl_bitmap_use_dst_canvas, opengl_bitmap_use_dst_canvas, bm, ogl_colors::white, fill);//use opengl to scale, faster and saves ram. -MPM
+		return;
+	}
+#elif DXX_USE_VULKAN
+	if (bm.get_type() == bm_mode::linear && scr.get_type() == bm_mode::vulkan &&
+		bm.bm_w <= grd_curscreen->get_screen_width() && bm.bm_h <= grd_curscreen->get_screen_height())
+	{
+		vks_ubitmapm_cs(canvas, 0, 0, vulkan_bitmap_use_dst_canvas, vulkan_bitmap_use_dst_canvas, bm, vks_colors::white, fill);
 		return;
 	}
 #else

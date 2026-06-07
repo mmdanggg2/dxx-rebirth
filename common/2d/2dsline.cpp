@@ -31,7 +31,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 namespace dcx {
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 namespace {
 #endif
 void gr_uscanline(grs_canvas &canvas, const unsigned x1, const unsigned x2, const unsigned y, const uint8_t color)
@@ -41,6 +41,8 @@ void gr_uscanline(grs_canvas &canvas, const unsigned x1, const unsigned x2, cons
 		case bm_mode::linear:
 #if DXX_USE_OGL
 		case bm_mode::ogl:
+#elif DXX_USE_VULKAN
+		case bm_mode::vulkan:
 #endif
 			{
 				const auto count = x2 - x1 + 1;
@@ -56,7 +58,7 @@ void gr_uscanline(grs_canvas &canvas, const unsigned x1, const unsigned x2, cons
 			break;
 		}
 }
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 }
 #endif
 
