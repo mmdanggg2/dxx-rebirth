@@ -211,54 +211,54 @@ int gr_set_mode(screen_mode mode)
 	gr_init_canvas(grd_curscreen->sc_canvas, gr_new_bm_data, bm_mode::vulkan, w, h);
 
 	/* Reinitialize Vulkan swapchain */
-	::dcx::vk_surface_extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+	vk_surface_extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
 
 	/* Destroy old swapchain and related resources */
-	if (::dcx::vk_swapchain) {
+	if (vk_swapchain) {
 		vulkan_sync_helper.deinit();
-		vkDeviceWaitIdle(::dcx::vk_device);
+		vkDeviceWaitIdle(vk_device);
 
-		for (auto &fence : ::dcx::vk_in_flight_fences)
-			vkDestroyFence(::dcx::vk_device, fence, nullptr);
-		for (auto &sem : ::dcx::vk_render_finished_semaphores)
-			vkDestroySemaphore(::dcx::vk_device, sem, nullptr);
-		for (auto &sem : ::dcx::vk_image_available_semaphores)
-			vkDestroySemaphore(::dcx::vk_device, sem, nullptr);
-		for (auto &fb : ::dcx::vk_framebuffers)
-			vkDestroyFramebuffer(::dcx::vk_device, fb, nullptr);
-		if (::dcx::vk_render_pipeline)
-			vkDestroyPipeline(::dcx::vk_device, ::dcx::vk_render_pipeline, nullptr);
-		if (::dcx::vk_swapchain)
-			vkDestroySwapchainKHR(::dcx::vk_device, ::dcx::vk_swapchain, nullptr);
-		if (::dcx::vk_depth_image_view)
-			vkDestroyImageView(::dcx::vk_device, ::dcx::vk_depth_image_view, nullptr);
-		if (::dcx::vk_depth_image_memory)
-			vkFreeMemory(::dcx::vk_device, ::dcx::vk_depth_image_memory, nullptr);
-		if (::dcx::vk_depth_image)
-			vkDestroyImage(::dcx::vk_device, ::dcx::vk_depth_image, nullptr);
-		if (::dcx::vk_render_pass)
-			vkDestroyRenderPass(::dcx::vk_device, ::dcx::vk_render_pass, nullptr);
+		for (auto &fence : vk_in_flight_fences)
+			vkDestroyFence(vk_device, fence, nullptr);
+		for (auto &sem : vk_render_finished_semaphores)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+		for (auto &sem : vk_image_available_semaphores)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+		for (auto &fb : vk_framebuffers)
+			vkDestroyFramebuffer(vk_device, fb, nullptr);
+		if (vk_render_pipeline)
+			vkDestroyPipeline(vk_device, vk_render_pipeline, nullptr);
+		if (vk_swapchain)
+			vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
+		if (vk_depth_image_view)
+			vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
+		if (vk_depth_image_memory)
+			vkFreeMemory(vk_device, vk_depth_image_memory, nullptr);
+		if (vk_depth_image)
+			vkDestroyImage(vk_device, vk_depth_image, nullptr);
+		if (vk_render_pass)
+			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
 	}
 
 	/* Recreate swapchain */
-	::dcx::vks_init_swapchain(w, h);
-	::dcx::vks_init_render_pass();
-	::dcx::vks_init_pipeline();
-	::dcx::vks_init_framebuffers(w, h);
-	::dcx::vks_init_command_buffers();
-	::dcx::vks_init_sync_objects();
+	vks_init_swapchain(w, h);
+	vks_init_render_pass();
+	vks_init_pipeline();
+	vks_init_framebuffers(w, h);
+	vks_init_command_buffers();
+	vks_init_sync_objects();
 
 	/* Recreate depth resources */
-	::dcx::initDepthResources();
+	initDepthResources();
 
 	/* Recreate vertex buffers */
-	::dcx::initVertexBuffers();
+	initVertexBuffers();
 
 	/* Update sync helper */
 	vulkan_sync_helper.init();
 
 	/* Initialize rendering state */
-	::dcx::vks_init_state();
+	vks_init_state();
 	gamefont_choose_game_font(w, h);
 	gr_remap_color_fonts();
 
@@ -294,8 +294,8 @@ void gr_close()
 	if (vulkan_initialized)
 	{
 		vulkan_sync_helper.deinit();
-		::dcx::vks_shutdown_textures();
-		::dcx::vks_shutdown();
+		vks_shutdown_textures();
+		vks_shutdown();
 	}
 
 	if (grd_curscreen)
