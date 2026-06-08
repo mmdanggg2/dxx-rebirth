@@ -22,6 +22,9 @@
 
 namespace dcx {
 
+/* SDL window handle — defined here for common Vulkan build (used by event.cpp) */
+SDL_Window *g_pRebirthSDLMainWindow;
+
 /* Vulkan global state */
 VkInstance vk_instance;
 VkPhysicalDevice vk_physical_device;

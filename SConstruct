@@ -1490,6 +1490,9 @@ int main(int argc,char**argv)
 		if user_settings.vulkan and (user_settings.opengl or user_settings.opengles):
 			Result('ERROR: Vulkan and OpenGL/OpenGL ES are mutually exclusive. Set opengl=0 or opengles=0 to enable Vulkan.')
 			raise SCons.Errors.StopError('Vulkan and OpenGL/OpenGL ES are mutually exclusive.')
+		if user_settings.vulkan and not user_settings.sdl2:
+			Result('ERROR: Vulkan renderer requires SDL2. Set sdl2=1 to enable Vulkan.')
+			raise SCons.Errors.StopError('Vulkan renderer requires SDL2.')
 		_define_macro(context, 'DXX_USE_VULKAN', int(user_settings.vulkan))
 		Result(f'{self.msgprefix}: building with {"Vulkan" if user_settings.vulkan else "no Vulkan renderer"}')
 

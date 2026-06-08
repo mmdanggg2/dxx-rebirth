@@ -31,16 +31,20 @@
 #include "args.h"
 
 #include <SDL.h>
+#include <SDL_vulkan.h>
 #include <cstring>
 #include <algorithm>
 #include <array>
 #include <vector>
 #include <set>
 
+/* Window position tracking — defined here since ogl/gr.cpp only compiles for OpenGL builds */
+int g_iRebirthWindowX = 0, g_iRebirthWindowY = 0;
+
 namespace dcx {
 
 /* Vulkan global state — populated by vk_init.cpp */
-void *g_pRebirthVulkanWindow = nullptr;
+SDL_Window *g_pRebirthVulkanWindow = nullptr;
 
 /* Sync helper */
 extern vks_sync vulkan_sync_helper;
@@ -94,16 +98,11 @@ static void init_descriptor_set_layout()
 
 int gr_check_fullscreen(void)
 {
-#if SDL_MAJOR_VERSION == 2
 	return !!(SDL_GetWindowFlags(g_pRebirthVulkanWindow) & SDL_WINDOW_FULLSCREEN);
-#else
-	return 0;
-#endif
 }
 
 void gr_toggle_fullscreen()
 {
-#if SDL_MAJOR_VERSION == 2
 	const auto SDLWindow{g_pRebirthVulkanWindow};
 	const bool is_fullscreen = SDL_GetWindowFlags(SDLWindow) & SDL_WINDOW_FULLSCREEN;
 	CGameCfg.WindowMode = is_fullscreen;
@@ -116,12 +115,10 @@ void gr_toggle_fullscreen()
 		SDL_SetWindowSize(SDLWindow, SM_W(mode), SM_H(mode));
 	}
 	gr_set_mode_from_window_size();
-#endif
 }
 
 uint_fast32_t gr_list_modes(std::array<screen_mode, 50> &gsmodes)
 {
-#if SDL_MAJOR_VERSION == 2
 	int modeCount = SDL_GetNumDisplayModes(0);
 	uint_fast32_t modesnum = 0;
 	for (int i = 0; i < modeCount && modesnum < gsmodes.size(); i++) {
@@ -135,15 +132,16 @@ uint_fast32_t gr_list_modes(std::array<screen_mode, 50> &gsmodes)
 		}
 	}
 	return modesnum;
-#else
-	(void)gsmodes;
-	return 0;
-#endif
 }
 
 } /* namespace dcx */
 
 namespace dsx {
+
+void gr_set_mode_from_window_size()
+{
+	/* Stub — full implementation requires window resize logic */
+}
 
 void vulkan_init_surface_from_window(void *window)
 {
@@ -166,18 +164,12 @@ void vulkan_init_surface_from_window(void *window)
 		::dcx::vk_surface = surface;
 	}
 #else
-	/* Use SDL_Vulkan functions if available (SDL 2.0.6+) */
+	/* Use SDL_Vulkan functions */
 	VkSurfaceKHR surface{};
-#if SDL_MAJOR_VERSION >= 2
-	VkResult result = SDL_Vulkan_CreateSurface(reinterpret_cast<SDL_Window *>(window), ::dcx::vk_instance, &surface);
-	if (result == VK_SUCCESS) {
+	SDL_bool result = SDL_Vulkan_CreateSurface(reinterpret_cast<SDL_Window *>(window), ::dcx::vk_instance, &surface);
+	if (result == SDL_TRUE) {
 		::dcx::vk_surface = surface;
 	}
-#else
-	(void)window;
-	(void)::dcx::vk_instance;
-	/* SDL 1.2 does not support Vulkan surface creation */
-#endif
 #endif
 	(void)surface; /* used above but may be unused depending on platform */
 }
@@ -294,16 +286,15 @@ int gr_set_mode(screen_mode mode)
 
 void gr_set_attributes(void)
 {
-#if SDL_MAJOR_VERSION == 2
 	/* Vulkan doesn't use SDL GL attributes, but we set window flags */
-	unsigned sdl_window_flags = SDL_WINDOW_VULKAN;
+	/* TODO: Apply these flags when creating the Vulkan window */
+	(void)SDL_WINDOW_VULKAN;
 	if (CGameArg.SysNoBorders)
-		sdl_window_flags |= SDL_WINDOW_BORDERLESS;
+		(void)SDL_WINDOW_BORDERLESS;
 	if (!CGameCfg.WindowMode && !CGameArg.SysWindow)
-		sdl_window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+		(void)SDL_WINDOW_FULLSCREEN_DESKTOP;
 #if defined(__APPLE__) && defined(__MACH__)
-	sdl_window_flags |= SDL_WINDOW_ALLOW_HIGHDPI;
-#endif
+	(void)SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 }
 

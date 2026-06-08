@@ -84,11 +84,9 @@ void vks_swap_buffers_internal(void)
 {
 	vulkan_sync_helper.before_swap();
 
-#if SDL_MAJOR_VERSION == 2
-	SDL_Vulkan_SwapWindow(g_pRebirthVulkanWindow);
-#elif SDL_MAJOR_VERSION == 1
-	/* SDL 1 doesn't support Vulkan natively */
-#endif
+	/* SDL_Vulkan_SwapWindow not available in all SDL2 versions.
+	 * Vulkan presentation is handled by vkQueuePresentKHR in the render pipeline. */
+	(void)g_pRebirthVulkanWindow;
 
 	vulkan_sync_helper.after_swap();
 }
