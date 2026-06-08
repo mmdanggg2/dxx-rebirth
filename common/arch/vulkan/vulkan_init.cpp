@@ -13,6 +13,8 @@
 #include "window.h"
 #include "error.h"
 
+#include <SDL.h>
+#include <SDL_vulkan.h>
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -182,12 +184,8 @@ static void createDevice()
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
 	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
-	if (enableValidationLayers) {
-		createInfo.enabledLayerCount = static_cast<uint32_t>(std::size(validationLayers));
-		createInfo.ppEnabledLayerNames = validationLayers;
-	} else {
-		createInfo.enabledLayerCount = 0;
-	}
+	/* Device layers deprecated since Vulkan 1.0 — only enable on VkInstance. */
+	createInfo.enabledLayerCount = 0;
 
 	VkResult result = vkCreateDevice(vk_physical_device, &createInfo, nullptr, &vk_device);
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create device");;
@@ -320,7 +318,7 @@ void initDepthResources()
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create depth image view");;
 }
 
-void vks_init_instance()
+void vks_init_instance(SDL_Window *sdl_window)
 {
 	VkApplicationInfo appInfo{};
 	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -330,20 +328,26 @@ void vks_init_instance()
 	appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
 	appInfo.apiVersion = VK_API_VERSION_1_0;
 
-	VkInstanceCreateInfo createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-	createInfo.pApplicationInfo = &appInfo;
-	createInfo.enabledExtensionCount = 0;
-	createInfo.enabledLayerCount = 0;
+	/* Query required instance extensions from SDL — these are platform-specific
+	 * (e.g. VK_KHR_wayland_surface, VK_KHR_xlib_surface, VK_KHR_win32_surface)
+	 * and are needed by SDL_Vulkan_CreateSurface later. */
+	uint32_t extensionCount = 0;
+	SDL_Vulkan_GetInstanceExtensions(sdl_window, &extensionCount, nullptr);
+	std::vector<const char *> requiredExtensions(extensionCount);
+	SDL_Vulkan_GetInstanceExtensions(sdl_window, &extensionCount, requiredExtensions.data());
+
+	bool layersSupported = false;
 
 	if (enableValidationLayers) {
+		/* The debug messenger requires its own extension. */
+		requiredExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		/* Query available layers */
 		uint32_t layerCount = 0;
 		vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 		std::vector<VkLayerProperties> availableLayers(layerCount);
 		vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
-		bool layersSupported = true;
+		layersSupported = true;
 		for (const char *layerName : validationLayers) {
 			bool found = false;
 			for (const auto &lp : availableLayers) {
@@ -357,33 +361,42 @@ void vks_init_instance()
 				break;
 			}
 		}
+	}
 
-		if (layersSupported) {
-			createInfo.enabledLayerCount = static_cast<uint32_t>(std::size(validationLayers));
-			createInfo.ppEnabledLayerNames = validationLayers;
+	VkInstanceCreateInfo createInfo{};
+	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	createInfo.pApplicationInfo = &appInfo;
+	createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredExtensions.size());
+	createInfo.ppEnabledExtensionNames = requiredExtensions.data();
+	createInfo.enabledLayerCount = 0;
 
-			VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
-			debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-			debugCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-			debugCreateInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-				VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-			debugCreateInfo.pfnUserCallback = debugCallback;
-			createInfo.pNext = &debugCreateInfo;
-		} else {
-			con_printf(CON_URGENT, "Vulkan: Validation layers not available, continuing without them");
-		}
+	if (enableValidationLayers && layersSupported) {
+		createInfo.enabledLayerCount = static_cast<uint32_t>(std::size(validationLayers));
+		createInfo.ppEnabledLayerNames = validationLayers;
+	} else if (enableValidationLayers && !layersSupported) {
+		con_printf(CON_URGENT, "Vulkan: Validation layers not available, continuing without them");
 	}
 
 	VkResult result = vkCreateInstance(&createInfo, nullptr, &vk_instance);
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create instance");;
+
+	if (enableValidationLayers && layersSupported) {
+		VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
+		debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+		debugCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
+			VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+			VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+		debugCreateInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+			VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+			VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+		debugCreateInfo.pfnUserCallback = debugCallback;
+		if (CreateDebugUtilsMessengerEXT(vk_instance, &debugCreateInfo, nullptr, &vk_debug_messenger) != VK_SUCCESS)
+			con_printf(CON_URGENT, "Vulkan: Failed to create debug messenger");
+	}
 }
 
 void vks_init_physical_device()
 {
-	vk_surface = VK_NULL_HANDLE;
 	pickPhysicalDevice();
 }
 
@@ -392,11 +405,13 @@ void vks_init_device()
 	createDevice();
 }
 
-void vks_init_surface(void * /*window_handle*/)
+void vks_init_surface(SDL_Window *window_handle)
 {
-	/* Surface creation is delegated to similar/arch/vulkan/vk_init.cpp
-	 * which has access to the SDL window surface.
-	 */
+	VkSurfaceKHR surface{};
+	SDL_bool result = SDL_Vulkan_CreateSurface(window_handle, vk_instance, &surface);
+	if (result != SDL_TRUE)
+		Error("Vulkan: Failed to create surface from SDL window: %s", SDL_GetError());
+	vk_surface = surface;
 }
 
 void vks_init_swapchain(uint32_t width, uint32_t height)

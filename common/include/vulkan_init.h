@@ -68,10 +68,10 @@ extern std::vector<VkFence> vk_in_flight_fences;
 extern uint32_t vk_current_frame;
 
 /* Initialization */
-void vks_init_instance();
+void vks_init_instance(SDL_Window *sdl_window);
 void vks_init_physical_device();
 void vks_init_device();
-void vks_init_surface(void *window_handle);
+void vks_init_surface(SDL_Window *window_handle);
 void vks_init_swapchain(uint32_t width, uint32_t height);
 void vks_init_render_pass();
 void vks_init_pipeline();
@@ -87,8 +87,6 @@ extern VkImageView vk_depth_image_view;
 void initDepthResources();
 void initVertexBuffers();
 
-/* Surface creation from external window */
-void vulkan_init_surface_from_window(void *window);
 
 /* Shutdown */
 void vks_shutdown();

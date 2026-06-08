@@ -143,58 +143,46 @@ void gr_set_mode_from_window_size()
 	/* Stub — full implementation requires window resize logic */
 }
 
-void vulkan_init_surface_from_window(void *window)
-{
-#ifdef _WIN32
-	VkWin32SurfaceCreateInfoEXT createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_EXT;
-	createInfo.hwnd = GetWindowLongPtr(window, GWLP_HWNDPRC) ? reinterpret_cast<HWND>(GetWindowLongPtr(window, GWLP_HWNDPRC)) : nullptr;
-	VkSurfaceKHR surface;
-	VkResult result = vkCreateWin32SurfaceKHR(::dcx::vk_instance, &createInfo, nullptr, &surface);
-	if (result == VK_SUCCESS) {
-		::dcx::vk_surface = surface;
-	}
-#elif defined(__APPLE__)
-	VkIOSSurfaceCreateInfoMVK createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_IO_SURFACE_CREATE_INFO_MVK;
-	createInfo.view = static_cast<MTLTexture *>(nullptr);  /* Simplified */
-	VkSurfaceKHR surface;
-	VkResult result = vkCreateIOSurfaceSurfaceMVK(::dcx::vk_instance, &createInfo, nullptr, &surface);
-	if (result == VK_SUCCESS) {
-		::dcx::vk_surface = surface;
-	}
-#else
-	/* Use SDL_Vulkan functions */
-	VkSurfaceKHR surface{};
-	SDL_bool result = SDL_Vulkan_CreateSurface(reinterpret_cast<SDL_Window *>(window), ::dcx::vk_instance, &surface);
-	if (result == SDL_TRUE) {
-		::dcx::vk_surface = surface;
-	}
-#endif
-	(void)surface; /* used above but may be unused depending on platform */
-}
-
 int gr_init()
 {
 	if (gr_installed)
 		return -1;
 
-	/* Initialize Vulkan instance */
-	::dcx::vks_init_instance();
+	/* Create an SDL window for Vulkan surface creation */
+	assert(!g_pRebirthVulkanWindow);
+	unsigned sdl_window_flags = SDL_WINDOW_VULKAN;
+	if (CGameArg.SysNoBorders)
+		sdl_window_flags |= SDL_WINDOW_BORDERLESS;
+	if (!CGameCfg.WindowMode && !CGameArg.SysWindow)
+		sdl_window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#if defined(__APPLE__) && defined(__MACH__)
+	sdl_window_flags |= SDL_WINDOW_ALLOW_HIGHDPI;
+#endif
+	const auto mode{Game_screen_mode};
+	g_pRebirthVulkanWindow = SDL_CreateWindow(DESCENT_VERSION, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SM_W(mode), SM_H(mode), sdl_window_flags);
+	if (!g_pRebirthVulkanWindow) {
+		con_printf(CON_URGENT, "Vulkan: SDL_CreateWindow failed: %s", SDL_GetError());
+		return -1;
+	}
+	SDL_GetWindowPosition(g_pRebirthVulkanWindow, &g_iRebirthWindowX, &g_iRebirthWindowY);
+	if (const auto window_icon = SDL_LoadBMP(DXX_SDL_WINDOW_ICON_BITMAP))
+		SDL_SetWindowIcon(g_pRebirthVulkanWindow, window_icon);
+
+	/* Initialize Vulkan instance (needs window for platform-specific extensions) */
+	vks_init_instance(g_pRebirthVulkanWindow);
 
 	/* Create surface from SDL window */
-	assert(g_pRebirthVulkanWindow);
-	::dcx::vks_init_surface(reinterpret_cast<void *>(g_pRebirthVulkanWindow));
+	vks_init_surface(g_pRebirthVulkanWindow);
 
 	/* Initialize physical device */
-	::dcx::vks_init_physical_device();
-	::dcx::vks_init_device();
+	vks_init_physical_device();
+	vks_init_device();
 
 	/* Find depth format */
-	::dcx::find_depth_format();
+	find_depth_format();
 
 	/* Create descriptor set layout */
-	::dcx::init_descriptor_set_layout();
+	init_descriptor_set_layout();
 
 	/* Set up sync helper */
 	vulkan_sync_helper.init();
