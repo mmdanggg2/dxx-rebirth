@@ -10,6 +10,7 @@
 
 #include "vulkan_init.h"
 #include "vulkan_textures.h"
+#include "vulkan/shaders/generated.h"
 #include "window.h"
 #include "error.h"
 
@@ -34,6 +35,7 @@ VkDevice vk_device;
 VkQueue vk_graphics_queue;
 VkSurfaceKHR vk_surface;
 VkSwapchainKHR vk_swapchain;
+std::vector<VkImageView> vk_swapchain_image_views;
 
 uint32_t vk_graphics_queue_family;
 uint32_t vk_surface_family;
@@ -473,6 +475,55 @@ void vks_init_swapchain(uint32_t width, uint32_t height)
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create swapchain");;
 }
 
+void vks_init_swapchain_image_views()
+{
+	uint32_t imageCount;
+	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, nullptr);
+	std::vector<VkImage> images(imageCount);
+	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, images.data());
+
+	vk_swapchain_image_views.resize(imageCount);
+	for (uint32_t i = 0; i < imageCount; i++) {
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = images[i];
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = vk_swapchain_format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		VkResult result = vkCreateImageView(vk_device, &viewInfo, nullptr, &vk_swapchain_image_views[i]);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create swapchain image view");
+	}
+
+	/* Transition all swapchain images to COLOR_ATTACHMENT_OPTIMAL */
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image = images[0];
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.layerCount = 1;
+
+	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+	vkCmdPipelineBarrier(
+		vk_command_buffers[0], srcStage, dstStage, 0,
+		0, nullptr, 0, nullptr, 1, &barrier);
+}
+
+void vks_destroy_swapchain_image_views()
+{
+	for (auto &view : vk_swapchain_image_views)
+		vkDestroyImageView(vk_device, view, nullptr);
+	vk_swapchain_image_views.clear();
+}
+
 void vks_init_render_pass()
 {
 	VkAttachmentDescription colorAttachment{};
@@ -637,11 +688,36 @@ void vks_init_pipeline()
 	VkResult result = vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_pipeline_layout);
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create pipeline layout");;
 
-	/* Pipeline — stages will be filled in once shaders are compiled */
+	/* Vertex shader SPIR-V (generated at build time from GLSL) */
+	VkShaderModuleCreateInfo vertexInfo{};
+	vertexInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	vertexInfo.codeSize = vulkan::vertex_spv_size();
+	vertexInfo.pCode = vulkan::vertex_spv_code();
+	if (vkCreateShaderModule(vk_device, &vertexInfo, nullptr, &vk_vertex_shader) != VK_SUCCESS)
+		Error("Vulkan: Failed to create vertex shader module");
+
+	/* Fragment shader SPIR-V (generated at build time from GLSL) */
+	VkShaderModuleCreateInfo fragmentInfo{};
+	fragmentInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	fragmentInfo.codeSize = vulkan::fragment_spv_size();
+	fragmentInfo.pCode = vulkan::fragment_spv_code();
+	if (vkCreateShaderModule(vk_device, &fragmentInfo, nullptr, &vk_fragment_shader) != VK_SUCCESS)
+		Error("Vulkan: Failed to create fragment shader module");
+
+	std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = vk_vertex_shader;
+	stages[0].pName = "main";
+	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = vk_fragment_shader;
+	stages[1].pName = "main";
+
 	VkGraphicsPipelineCreateInfo pipelineInfo{};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = 0;
-	pipelineInfo.pStages = nullptr;
+	pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
+	pipelineInfo.pStages = stages.data();
 	pipelineInfo.pVertexInputState = &vertexInputInfo;
 	pipelineInfo.pInputAssemblyState = &inputAssembly;
 	pipelineInfo.pViewportState = &viewportState;
@@ -663,7 +739,9 @@ void vks_init_framebuffers(uint32_t width, uint32_t height)
 {
 	vk_framebuffers.resize(3);
 
-	VkImageView attachments[2] = {VK_NULL_HANDLE, vk_depth_image_view};
+	VkImageView attachments[3] = {VK_NULL_HANDLE, vk_depth_image_view, VK_NULL_HANDLE};
+	if (!vk_swapchain_image_views.empty())
+		attachments[0] = vk_swapchain_image_views[vk_current_frame];
 
 	for (uint32_t i = 0; i < 3; i++) {
 		VkFramebufferCreateInfo fbInfo{};
@@ -773,6 +851,10 @@ void vks_shutdown()
 	if (vk_vertex_buffer)
 		vkDestroyBuffer(vk_device, vk_vertex_buffer, nullptr);
 
+	if (vk_fragment_shader)
+		vkDestroyShaderModule(vk_device, vk_fragment_shader, nullptr);
+	if (vk_vertex_shader)
+		vkDestroyShaderModule(vk_device, vk_vertex_shader, nullptr);
 	if (vk_render_pipeline)
 		vkDestroyPipeline(vk_device, vk_render_pipeline, nullptr);
 	if (vk_pipeline_layout)

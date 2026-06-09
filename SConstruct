@@ -4922,7 +4922,7 @@ class DXXCommon(LazyObjectConstructor):
 		# appended to this list and will override these defaults.  The
 		# defaults are present to ensure that a user who does not set
 		# any options gets a good default experience.
-		env.Prepend(CXXFLAGS = ['-g', '-O2'])
+		env.Prepend(CXXFLAGS = ['-g', '-O2'] if not user_settings.debug else ['-g3', '-O0'])
 		# Raspberry Pi?
 		if user_settings.raspberrypi == 'yes':
 			rpi_vc_path = user_settings.rpi_vc_path
@@ -5336,6 +5336,32 @@ class DXXProgram(DXXCommon):
 			env.Depends(kconfig_static_object, generated_udlr_header)
 			return kconfig_static_object
 
+	def _generate_vulkan_shaders(self, env):
+		"""Generate C++ header with embedded SPIR-V from GLSL shaders."""
+		import pathlib
+		import subprocess
+		import sys as _sys
+		# srcdir is the game subdirectory (d1x-rebirth/d2x-rebirth),
+		# we need the repo root for common paths
+		repo_root = str(pathlib.Path(self.srcdir).parent)
+		builddir = self.builddir
+		shader_src_dir = pathlib.Path(f'{repo_root}/common/arch/vulkan/shaders')
+		gen_script = pathlib.Path(f'{repo_root}/common/arch/vulkan/generate-shaders.py')
+		build_dir = pathlib.Path(str(builddir))
+		shader_build_dir = build_dir / 'vulkan' / 'shaders'
+		shader_build_dir.mkdir(parents=True, exist_ok=True)
+		spv_files = []
+		for ext in ('.vert', '.frag'):
+			for src in sorted(shader_src_dir.glob(f'*{ext}')):
+				spv_path = shader_build_dir / f'{src.stem}.spv'
+				subprocess.run(['glslc', '--target-env=vulkan1.0', str(src), '-o', str(spv_path)], check=True)
+				spv_files.append(spv_path)
+		if spv_files:
+			generated_header = shader_build_dir / 'generated.h'
+			subprocess.run([_sys.executable, str(gen_script), str(generated_header)] + [str(s) for s in spv_files], check=True)
+			return env.File(str(generated_header))
+		return None
+
 	static_archive_construction = {}
 
 	# Take a pathname as input.  Return a pathname referring to the same
@@ -5706,6 +5732,15 @@ class DXXProgram(DXXCommon):
 			objects_similar_arch = self.get_objects_similar_arch_sdl
 		objects.extend(static_objects_arch())
 		objects.extend(objects_similar_arch())
+		if user_settings.vulkan:
+			# Compile GLSL shaders to SPIR-V and generate C++ header
+			generated_header = self._generate_vulkan_shaders(env)
+			if generated_header is not None:
+				# Add dependency from vulkan_init.cpp object to the generated header
+				for obj in objects:
+					if hasattr(obj, 'source') and 'vulkan_init.cpp' in str(obj.source):
+						env.Requires(obj, generated_header)
+						break
 		if user_settings.editor:
 			objects.extend(self.get_objects_editor())
 			objects.extend(static_archive_construction.get_objects_editor())

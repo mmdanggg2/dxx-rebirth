@@ -117,23 +117,6 @@ void gr_toggle_fullscreen()
 	gr_set_mode_from_window_size();
 }
 
-uint_fast32_t gr_list_modes(std::array<screen_mode, 50> &gsmodes)
-{
-	int modeCount = SDL_GetNumDisplayModes(0);
-	uint_fast32_t modesnum = 0;
-	for (int i = 0; i < modeCount && modesnum < gsmodes.size(); i++) {
-		SDL_DisplayMode mode;
-		if (SDL_GetDisplayMode(0, i, &mode) == 0) {
-			if (mode.w > 320 && mode.h > 200 && mode.w < 4096 && mode.h < 4096) {
-				gsmodes[modesnum].width = mode.w;
-				gsmodes[modesnum].height = mode.h;
-				modesnum++;
-			}
-		}
-	}
-	return modesnum;
-}
-
 } /* namespace dcx */
 
 namespace dsx {
@@ -187,6 +170,17 @@ int gr_init()
 	/* Set up sync helper */
 	vulkan_sync_helper.init();
 
+	grd_curscreen = std::make_unique<grs_screen>();
+	*grd_curscreen = {};
+	grd_curscreen->sc_canvas.cv_bitmap.bm_data = NULL;
+
+	// Set the mode.
+	grd_curscreen->sc_canvas.cv_fade_level = GR_FADE_OFF;
+	grd_curscreen->sc_canvas.cv_font = NULL;
+	grd_curscreen->sc_canvas.cv_font_fg_color = 0;
+	grd_curscreen->sc_canvas.cv_font_bg_color = 0;
+	gr_set_current_canvas(grd_curscreen->sc_canvas);
+
 	gr_installed = 1;
 	vulkan_initialized = 1;
 
@@ -230,6 +224,9 @@ int gr_set_mode(screen_mode mode)
 			vkDestroyPipeline(vk_device, vk_render_pipeline, nullptr);
 		if (vk_swapchain)
 			vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
+		for (auto &view : vk_swapchain_image_views)
+			vkDestroyImageView(vk_device, view, nullptr);
+		vk_swapchain_image_views.clear();
 		if (vk_depth_image_view)
 			vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
 		if (vk_depth_image_memory)
@@ -243,13 +240,12 @@ int gr_set_mode(screen_mode mode)
 	/* Recreate swapchain */
 	vks_init_swapchain(w, h);
 	vks_init_render_pass();
-	vks_init_pipeline();
-	vks_init_framebuffers(w, h);
-	vks_init_command_buffers();
-	vks_init_sync_objects();
-
-	/* Recreate depth resources */
 	initDepthResources();
+	vks_init_command_buffers();
+	vks_init_pipeline();
+	vks_init_swapchain_image_views();
+	vks_init_framebuffers(w, h);
+	vks_init_sync_objects();
 
 	/* Recreate vertex buffers */
 	initVertexBuffers();

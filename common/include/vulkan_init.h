@@ -40,6 +40,7 @@ extern VkDevice vk_device;
 extern VkQueue vk_graphics_queue;
 extern VkSurfaceKHR vk_surface;
 extern VkSwapchainKHR vk_swapchain;
+extern std::vector<VkImageView> vk_swapchain_image_views;
 
 extern uint32_t vk_graphics_queue_family;
 extern uint32_t vk_surface_family;
@@ -73,6 +74,8 @@ void vks_init_physical_device();
 void vks_init_device();
 void vks_init_surface(SDL_Window *window_handle);
 void vks_init_swapchain(uint32_t width, uint32_t height);
+void vks_init_swapchain_image_views();
+void vks_destroy_swapchain_image_views();
 void vks_init_render_pass();
 void vks_init_pipeline();
 void vks_init_framebuffers(uint32_t width, uint32_t height);
