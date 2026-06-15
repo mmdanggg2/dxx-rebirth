@@ -897,15 +897,22 @@ void vks_shutdown()
 	if (vk_swapchain)
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 
+	vks_destroy_swapchain_image_views();
+
+	if (vk_descriptor_set_layout)
+		vkDestroyDescriptorSetLayout(vk_device, vk_descriptor_set_layout, nullptr);
+
 	for (auto &pool : vk_command_pools)
 		vkDestroyCommandPool(vk_device, pool, nullptr);
 
 	vkDestroyDevice(vk_device, nullptr);
 	vkDestroySurfaceKHR(vk_instance, vk_surface, nullptr);
-	vkDestroyInstance(vk_instance, nullptr);
-
+	
 	if (vk_debug_messenger)
 		DestroyDebugUtilsMessengerEXT(vk_instance, vk_debug_messenger, nullptr);
+
+	vkDestroyInstance(vk_instance, nullptr);
+
 }
 
 } /* namespace dcx */
