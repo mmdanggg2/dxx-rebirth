@@ -337,9 +337,7 @@ static DiskBitmapHeader DiskBitmapHeader_read(const NamedPHYSFS_File fp)
 	dbh.wh_extra = PHYSFSX_readByte(fp);
 #endif
 	dbh.flags = PHYSFSX_readByte(fp);
-	#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	dbh.avg_color = PHYSFSX_readByte(fp);
-	#endif
 	dbh.offset = PHYSFSX_readInt(fp);
 	return dbh;
 }
@@ -356,9 +354,7 @@ static DiskBitmapHeader DiskBitmapHeader_d1_read(const NamedPHYSFS_File fp)
 	dbh.width = PHYSFSX_readByte(fp);
 	dbh.height = PHYSFSX_readByte(fp);
 	dbh.flags = PHYSFSX_readByte(fp);
-	#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	dbh.avg_color = PHYSFSX_readByte(fp);
-	#endif
 	dbh.offset = PHYSFSX_readInt(fp);
 	return dbh;
 }
