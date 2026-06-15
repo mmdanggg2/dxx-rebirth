@@ -31,11 +31,8 @@ vks_sync::~vks_sync()
 
 void vks_sync::before_swap()
 {
-	/* Wait for the GPU to finish the previous frame */
-	if (current_fence) {
-		vkWaitForFences(vk_device, 1, &current_fence, VK_TRUE, UINT64_MAX);
-		vkResetFences(vk_device, 1, &current_fence);
-	}
+	/* Frame sync is now handled in vks_start_frame() via vk_in_flight_fences.
+	 * This is kept as a no-op to maintain the vks_sync interface. */
 }
 
 void vks_sync::after_swap()
@@ -62,9 +59,10 @@ void vks_sync::deinit()
 
 void vks_sync::record_frame(uint32_t frame_index)
 {
+	/* Allocate temporary command buffer from the per-frame command pool */
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = VK_NULL_HANDLE;  // Would be created from pool
+	allocInfo.commandPool = vk_command_pools[frame_index % vk_command_pools.size()];
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	allocInfo.commandBufferCount = 1;
 
@@ -110,7 +108,7 @@ void vks_sync::record_frame(uint32_t frame_index)
 	result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, current_fence);
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to submit command buffer");
 
-	vkFreeCommandBuffers(vk_device, VK_NULL_HANDLE, 1, &cmdBuffer);
+	vkFreeCommandBuffers(vk_device, vk_command_pools[frame_index % vk_command_pools.size()], 1, &cmdBuffer);
 }
 
 vks_sync vulkan_sync_helper;

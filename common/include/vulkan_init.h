@@ -41,6 +41,7 @@ extern VkQueue vk_graphics_queue;
 extern VkSurfaceKHR vk_surface;
 extern VkSwapchainKHR vk_swapchain;
 extern std::vector<VkImageView> vk_swapchain_image_views;
+extern std::vector<VkImage> vk_swapchain_images;
 
 extern uint32_t vk_graphics_queue_family;
 extern uint32_t vk_surface_family;
@@ -58,9 +59,10 @@ extern VkPipelineLayout vk_pipeline_layout;
 extern VkShaderModule vk_vertex_shader;
 extern VkShaderModule vk_fragment_shader;
 
-/* Framebuffers and command buffers */
+/* Framebuffers, command buffers, and command pools */
 extern std::vector<VkFramebuffer> vk_framebuffers;
 extern std::vector<VkCommandBuffer> vk_command_buffers;
+extern std::vector<VkCommandPool> vk_command_pools;
 extern std::vector<VkSemaphore> vk_image_available_semaphores;
 extern std::vector<VkSemaphore> vk_render_finished_semaphores;
 extern std::vector<VkFence> vk_in_flight_fences;
@@ -75,6 +77,7 @@ void vks_init_device();
 void vks_init_surface(SDL_Window *window_handle);
 void vks_init_swapchain(uint32_t width, uint32_t height);
 void vks_init_swapchain_image_views();
+void vks_record_initial_barriers();
 void vks_destroy_swapchain_image_views();
 void vks_init_render_pass();
 void vks_init_pipeline();

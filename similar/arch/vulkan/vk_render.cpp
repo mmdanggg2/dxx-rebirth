@@ -70,25 +70,28 @@ static void vks_init_palette()
 
 void vks_init_state()
 {
-	/* Select clearing color */
-	VkClearValue clearValues[2]{};
-	clearValues[0].color = {0.0f, 0.0f, 0.0f, 0.0f};
-	clearValues[1].depthStencil = {1.0f, 0};
-
 	/* Initialize palette */
 	vks_init_palette();
 }
 
-/* Swap buffers */
+/* Swap buffers — present the rendered frame to the screen */
 void vks_swap_buffers_internal(void)
 {
-	vulkan_sync_helper.before_swap();
+	/* Present the completed frame to the swapchain */
+	VkPresentInfoKHR presentInfo{};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = &vk_render_finished_semaphores[vk_current_frame];
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &vk_swapchain;
+	presentInfo.pImageIndices = &vk_current_frame;
+	presentInfo.pResults = nullptr;
 
-	/* SDL_Vulkan_SwapWindow not available in all SDL2 versions.
-	 * Vulkan presentation is handled by vkQueuePresentKHR in the render pipeline. */
-	(void)g_pRebirthVulkanWindow;
-
-	vulkan_sync_helper.after_swap();
+	VkResult result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		return;
+	if (result != VK_SUCCESS)
+		con_puts(CON_URGENT, "Vulkan: vkQueuePresentKHR failed");
 }
 
 /* gr_flip — the main display function */

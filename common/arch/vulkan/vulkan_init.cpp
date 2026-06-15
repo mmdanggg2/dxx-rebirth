@@ -36,6 +36,7 @@ VkQueue vk_graphics_queue;
 VkSurfaceKHR vk_surface;
 VkSwapchainKHR vk_swapchain;
 std::vector<VkImageView> vk_swapchain_image_views;
+std::vector<VkImage> vk_swapchain_images;
 
 uint32_t vk_graphics_queue_family;
 uint32_t vk_surface_family;
@@ -53,6 +54,7 @@ VkShaderModule vk_fragment_shader;
 
 std::vector<VkFramebuffer> vk_framebuffers;
 std::vector<VkCommandBuffer> vk_command_buffers;
+std::vector<VkCommandPool> vk_command_pools;
 std::vector<VkSemaphore> vk_image_available_semaphores;
 std::vector<VkSemaphore> vk_render_finished_semaphores;
 std::vector<VkFence> vk_in_flight_fences;
@@ -479,14 +481,14 @@ void vks_init_swapchain_image_views()
 {
 	uint32_t imageCount;
 	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, nullptr);
-	std::vector<VkImage> images(imageCount);
-	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, images.data());
+	vk_swapchain_images.resize(imageCount);
+	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, vk_swapchain_images.data());
 
 	vk_swapchain_image_views.resize(imageCount);
 	for (uint32_t i = 0; i < imageCount; i++) {
 		VkImageViewCreateInfo viewInfo{};
 		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		viewInfo.image = images[i];
+		viewInfo.image = vk_swapchain_images[i];
 		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		viewInfo.format = vk_swapchain_format;
 		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -496,25 +498,6 @@ void vks_init_swapchain_image_views()
 		VkResult result = vkCreateImageView(vk_device, &viewInfo, nullptr, &vk_swapchain_image_views[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create swapchain image view");
 	}
-
-	/* Transition all swapchain images to COLOR_ATTACHMENT_OPTIMAL */
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = images[0];
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.layerCount = 1;
-
-	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	vkCmdPipelineBarrier(
-		vk_command_buffers[0], srcStage, dstStage, 0,
-		0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 void vks_destroy_swapchain_image_views()
@@ -522,6 +505,53 @@ void vks_destroy_swapchain_image_views()
 	for (auto &view : vk_swapchain_image_views)
 		vkDestroyImageView(vk_device, view, nullptr);
 	vk_swapchain_image_views.clear();
+}
+
+void vks_record_initial_barriers()
+{
+	/* Fetch swapchain images */
+	uint32_t imageCount;
+	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, nullptr);
+	std::vector<VkImage> swapchainImages(imageCount);
+	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, swapchainImages.data());
+
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.layerCount = 1;
+
+	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+	VkCommandBufferAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.commandPool = vk_command_pools[0];
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandBufferCount = 1;
+
+	for (uint32_t i = 0; i < imageCount; i++) {
+		barrier.image = swapchainImages[i];
+
+		VkCommandBuffer tmpCmd;
+		vkAllocateCommandBuffers(vk_device, &allocInfo, &tmpCmd);
+
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		vkBeginCommandBuffer(tmpCmd, &beginInfo);
+
+		vkCmdPipelineBarrier(tmpCmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+		vkEndCommandBuffer(tmpCmd);
+
+		vkFreeCommandBuffers(vk_device, vk_command_pools[0], 1, &tmpCmd);
+	}
 }
 
 void vks_init_render_pass()
@@ -760,24 +790,27 @@ void vks_init_framebuffers(uint32_t width, uint32_t height)
 
 void vks_init_command_buffers()
 {
-	VkCommandPoolCreateInfo poolInfo{};
-	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-	poolInfo.queueFamilyIndex = vk_graphics_queue_family;
-	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	vk_command_pools.resize(3);
 
-	VkCommandPool commandPool;
-	VkResult result = vkCreateCommandPool(vk_device, &poolInfo, nullptr, &commandPool);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create command pool");;
+	for (uint32_t i = 0; i < 3; i++) {
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.queueFamilyIndex = vk_graphics_queue_family;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+		VkResult result = vkCreateCommandPool(vk_device, &poolInfo, nullptr, &vk_command_pools[i]);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create command pool");;
+	}
 
 	vk_command_buffers.resize(3);
 
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = commandPool;
+	allocInfo.commandPool = vk_command_pools[0];
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	allocInfo.commandBufferCount = static_cast<uint32_t>(vk_command_buffers.size());
 
-	result = vkAllocateCommandBuffers(vk_device, &allocInfo, vk_command_buffers.data());
+	VkResult result = vkAllocateCommandBuffers(vk_device, &allocInfo, vk_command_buffers.data());
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate command buffers");;
 }
 
@@ -864,6 +897,9 @@ void vks_shutdown()
 	if (vk_swapchain)
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 
+	for (auto &pool : vk_command_pools)
+		vkDestroyCommandPool(vk_device, pool, nullptr);
+
 	vkDestroyDevice(vk_device, nullptr);
 	vkDestroySurfaceKHR(vk_instance, vk_surface, nullptr);
 	vkDestroyInstance(vk_instance, nullptr);
@@ -878,12 +914,78 @@ namespace dcx {
 
 void vks_start_frame(grs_canvas &)
 {
-	/* Stub: Vulkan frame would be started here */
+	/* Wait for the previous frame's GPU work to complete, then reset the fence */
+	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
+	vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
+
+	/* Acquire the next swapchain image for rendering */
+	VkResult result = vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
+		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_current_frame);
+
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		return;
+	if (result != VK_SUCCESS)
+		Error("Vulkan: Failed to acquire next swapchain image");
 }
 
 void vks_end_frame()
 {
-	/* Stub: Vulkan frame would be ended here */
+	/* Record a pipeline barrier: PRESENT_SRC_KHR -> UNDEFINED (discard old content) */
+	VkCommandBuffer cmdBuffer = vk_command_buffers[0];
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+
+	VkImageMemoryBarrier barrier{};
+	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	barrier.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	barrier.dstAccessMask = 0;
+	barrier.image = vk_swapchain_images[vk_current_frame];
+	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.layerCount = 1;
+
+	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+	vkCmdPipelineBarrier(cmdBuffer, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+	/* Begin render pass with clear values */
+	VkClearValue clearValues[2]{};
+	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	clearValues[1].depthStencil = {1.0f, 0};
+
+	VkRenderPassBeginInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	renderPassInfo.renderPass = vk_render_pass;
+	renderPassInfo.framebuffer = vk_framebuffers[vk_current_frame];
+	renderPassInfo.renderArea.offset = {0, 0};
+	renderPassInfo.renderArea.extent = vk_surface_extent;
+	renderPassInfo.clearValueCount = 2;
+	renderPassInfo.pClearValues = clearValues;
+
+	vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdEndRenderPass(cmdBuffer);
+
+	vkEndCommandBuffer(cmdBuffer);
+
+	/* Submit the command buffer to the graphics queue */
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmdBuffer;
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = &vk_render_finished_semaphores[vk_current_frame];
+
+	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, vk_in_flight_fences[vk_current_frame]);
+	if (!(result == VK_SUCCESS))
+		Error("Vulkan: Failed to submit render commands");
 }
 
 } /* namespace dcx */
