@@ -351,7 +351,6 @@ void vks_freebmtexture(grs_bitmap &bm)
 {
 	if (bm.get_type() != bm_mode::vulkan)
 		return;
-
 	vks_texture *tex = bm.vktexture;
 	if (tex) {
 		if (tex->descriptor_set)
@@ -378,6 +377,11 @@ void vks_freebmtexture(grs_bitmap &bm)
 
 void vks_shutdown_textures()
 {
+	/* Textures may still be sampled by an in-flight frame (gr_close calls this
+	 * before vks_shutdown's vkDeviceWaitIdle). Drain the queue first so we don't
+	 * destroy samplers/images the GPU is still reading (VUID-vkDestroySampler-
+	 * sampler-01082). */
+	vkDeviceWaitIdle(vk_device);
 	/* Destroy each occupied slot's Vulkan resources directly. The old code
 	 * reinterpret_cast a vks_texture as a grs_bitmap and routed it through
 	 * vks_freebmtexture, which is type-confused and corrupts the heap. */
@@ -454,6 +458,7 @@ void vks_init_white_texture()
 
 void vks_destroy_white_texture()
 {
+	vkDeviceWaitIdle(vk_device);
 	if (vk_white_texture.sampler)
 		vkDestroySampler(vk_device, vk_white_texture.sampler, nullptr);
 	if (vk_white_texture.view)
