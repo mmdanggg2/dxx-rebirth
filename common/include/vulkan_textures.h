@@ -20,7 +20,7 @@
 namespace dcx {
 
 /* Vulkan texture wrapper — the Vulkan equivalent of ogl_texture.
- * Holds aVk image, its view, and staging resources for upload.
+ * Holds a VkImage, its view, sampler, descriptor set, and staging resources.
  */
 struct vks_texture
 {
@@ -33,6 +33,9 @@ struct vks_texture
 	uint32_t height{};
 	uint32_t mip_levels{};
 	VkSampler sampler{};
+	/* Descriptor set binding this texture's view+sampler, written at upload
+	 * time and bound before any draw that samples it. */
+	VkDescriptorSet descriptor_set{};
 	VkBuffer staging_buffer{};
 	VkDeviceMemory staging_memory{};
 	size_t staging_size{};
@@ -40,6 +43,10 @@ struct vks_texture
 	int wrapstate{};
 	unsigned long numrend{};
 };
+
+/* Upper bound on simultaneously live textures; sizes the texture pool and the
+ * descriptor pool. Mirrors the software/OpenGL MAX_BITMAPS-class ceilings. */
+constexpr uint32_t VKS_MAX_TEXTURES = 512;
 
 /* Texture filter enum — mirrors opengl_texture_filter */
 enum class vulkan_texture_filter : uint8_t
@@ -60,6 +67,10 @@ void vks_freebmtexture(grs_bitmap &bm);
 
 /* Destroy all Vulkan resources (called during shutdown) */
 void vks_shutdown_textures();
+
+/* 1x1 opaque-white texture + descriptor set, bound for flat 2D primitives. */
+void vks_init_white_texture();
+void vks_destroy_white_texture();
 
 } /* namespace dcx */
 

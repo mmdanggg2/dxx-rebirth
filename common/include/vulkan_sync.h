@@ -39,8 +39,6 @@ public:
 	/* Destroy all synchronization objects */
 	void deinit();
 
-	/* Record one frame's worth of commands and submit to queue */
-	void record_frame(uint32_t frame_index);
 
 private:
 	VkFence current_fence{};

@@ -44,10 +44,12 @@ VkExtent2D vk_surface_extent;
 VkFormat vk_swapchain_format;
 VkFormat vk_depth_format;
 
-VkPipeline vk_render_pipeline;
+VkPipeline vk_2d_pipeline;
 VkRenderPass vk_render_pass;
 VkDescriptorSetLayout vk_descriptor_set_layout;
-VkPipelineLayout vk_pipeline_layout;
+VkPipelineLayout vk_2d_pipeline_layout;
+VkDescriptorPool vk_descriptor_pool;
+VkDescriptorSet vk_white_descriptor_set = VK_NULL_HANDLE;
 
 VkShaderModule vk_vertex_shader;
 VkShaderModule vk_fragment_shader;
@@ -56,10 +58,11 @@ std::vector<VkFramebuffer> vk_framebuffers;
 std::vector<VkCommandBuffer> vk_command_buffers;
 std::vector<VkCommandPool> vk_command_pools;
 std::vector<VkSemaphore> vk_image_available_semaphores;
-std::vector<VkSemaphore> vk_render_finished_semaphores;
+std::vector<VkSemaphore> vk_present_semaphores;
 std::vector<VkFence> vk_in_flight_fences;
 
 uint32_t vk_current_frame = 0;
+uint32_t vk_image_index = 0;
 
 /* Validation layers */
 #ifdef NDEBUG
@@ -210,56 +213,101 @@ static void createDevice()
 	return shaderModule;
 }
 
-/* Fullscreen quad for textured rendering: two triangles covering clip space */
-static const std::array<float, 24> fullscreenQuad = {
-	-1.0f, -1.0f,  0.0f, 0.0f,
-	 1.0f, -1.0f,  1.0f, 0.0f,
-	 1.0f,  1.0f,  1.0f, 1.0f,
-	-1.0f, -1.0f,  0.0f, 0.0f,
-	 1.0f,  1.0f,  1.0f, 1.0f,
-	-1.0f,  1.0f,  0.0f, 1.0f,
-};
-
-static VkBuffer vk_vertex_buffer = VK_NULL_HANDLE;
-static VkDeviceMemory vk_vertex_buffer_memory = VK_NULL_HANDLE;
-
-void initVertexBuffers()
+/* Per-frame vertex buffers: one per frame-in-flight, host-visible and
+ * persistently mapped. 2D draws append vertices to the current frame's
+ * buffer; vks_begin_frame resets that buffer's cursor once its fence has
+ * retired, so the GPU is done with the region we overwrite. */
+struct vks_frame_vb
 {
-	VkBufferCreateInfo bufferInfo{};
-	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = fullscreenQuad.size() * sizeof(float);
-	bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VkBuffer buffer{VK_NULL_HANDLE};
+	VkDeviceMemory memory{VK_NULL_HANDLE};
+	void *mapped{};
+	VkDeviceSize capacity{};
+	VkDeviceSize offset{};
+};
+static std::vector<vks_frame_vb> vk_frame_vbs;
+static constexpr VkDeviceSize VKS_VB_CAPACITY = 1 << 20; /* 1 MiB (~32k vertices) */
 
-	VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &vk_vertex_buffer);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create vertex buffer");;
-
-	VkMemoryRequirements memRequirements;
-	vkGetBufferMemoryRequirements(vk_device, vk_vertex_buffer, &memRequirements);
-
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memRequirements.size;
-
+/* Find a host-visible, host-coherent memory type for a buffer. */
+static uint32_t find_host_visible_memory_type(VkMemoryRequirements memRequirements)
+{
 	VkPhysicalDeviceMemoryProperties memProperties;
 	vkGetPhysicalDeviceMemoryProperties(vk_physical_device, &memProperties);
 	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
 		if ((memRequirements.memoryTypeBits & (1 << i)) &&
 			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
 			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-			allocInfo.memoryTypeIndex = i;
-			break;
+			return i;
 		}
 	}
+	Error("Vulkan: no host-visible coherent memory type for vertex buffer");
+}
 
-	result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &vk_vertex_buffer_memory);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate vertex buffer memory");;
+void vks_init_vertex_buffers()
+{
+	const size_t n = vk_command_buffers.size();
+	vk_frame_vbs.assign(n, vks_frame_vb{});
+	for (auto &vb : vk_frame_vbs) {
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = VKS_VB_CAPACITY;
+		bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	void *data;
-	result = vkMapMemory(vk_device, vk_vertex_buffer_memory, 0, bufferInfo.size, 0, &data);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to map vertex buffer memory");;
-	std::memcpy(data, fullscreenQuad.data(), bufferInfo.size);
-	vkUnmapMemory(vk_device, vk_vertex_buffer_memory);
+		VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &vb.buffer);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create vertex buffer");
+
+		VkMemoryRequirements memRequirements;
+		vkGetBufferMemoryRequirements(vk_device, vb.buffer, &memRequirements);
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memRequirements.size;
+		allocInfo.memoryTypeIndex = find_host_visible_memory_type(memRequirements);
+
+		result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &vb.memory);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate vertex buffer memory");
+
+		result = vkBindBufferMemory(vk_device, vb.buffer, vb.memory, 0);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to bind vertex buffer memory");
+
+		result = vkMapMemory(vk_device, vb.memory, 0, VKS_VB_CAPACITY, 0, &vb.mapped);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to map vertex buffer memory");
+
+		vb.capacity = VKS_VB_CAPACITY;
+		vb.offset = 0;
+	}
+}
+
+void vks_destroy_vertex_buffers()
+{
+	for (auto &vb : vk_frame_vbs) {
+		if (vb.mapped)
+			vkUnmapMemory(vk_device, vb.memory);
+		if (vb.buffer)
+			vkDestroyBuffer(vk_device, vb.buffer, nullptr);
+		if (vb.memory)
+			vkFreeMemory(vk_device, vb.memory, nullptr);
+	}
+	vk_frame_vbs.clear();
+}
+
+vks_vertex_alloc vks_alloc_vertices(uint32_t count)
+{
+	auto &vb = vk_frame_vbs[vk_current_frame];
+	if (vb.offset + count * sizeof(vks_vertex) > vb.capacity)
+		Error("Vulkan: vertex buffer overflow");
+	vks_vertex_alloc a;
+	a.buffer = vb.buffer;
+	a.offset = vb.offset;
+	a.vertices = reinterpret_cast<vks_vertex *>(static_cast<char *>(vb.mapped) + vb.offset);
+	vb.offset += count * sizeof(vks_vertex);
+	return a;
+}
+
+VkCommandBuffer vks_get_command_buffer()
+{
+	return vk_command_buffers[vk_current_frame];
 }
 
 VkImage vk_depth_image = VK_NULL_HANDLE;
@@ -598,7 +646,7 @@ void vks_init_render_pass()
 	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
-	std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
+	std::array<VkAttachmentDescription, 2> attachments = {{colorAttachment, depthAttachment}};
 
 	VkRenderPassCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -615,63 +663,53 @@ void vks_init_render_pass()
 
 void vks_init_pipeline()
 {
-	/* Vertex input */
+	/* Vertex input: pos(2) + uv(2) + color(4) = 32 bytes. */
 	VkVertexInputBindingDescription bindingDesc{};
 	bindingDesc.binding = 0;
-	bindingDesc.stride = sizeof(float) * 4;
+	bindingDesc.stride = sizeof(vks_vertex);
 	bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-	VkVertexInputAttributeDescription attrDescs[2]{};
+	VkVertexInputAttributeDescription attrDescs[3]{};
 	attrDescs[0].location = 0;
 	attrDescs[0].binding = 0;
 	attrDescs[0].format = VK_FORMAT_R32G32_SFLOAT;
-	attrDescs[0].offset = 0;
+	attrDescs[0].offset = 0; /* pos */
 	attrDescs[1].location = 1;
 	attrDescs[1].binding = 0;
 	attrDescs[1].format = VK_FORMAT_R32G32_SFLOAT;
-	attrDescs[1].offset = sizeof(float) * 2;
+	attrDescs[1].offset = offsetof(vks_vertex, u);
+	attrDescs[2].location = 2;
+	attrDescs[2].binding = 0;
+	attrDescs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+	attrDescs[2].offset = offsetof(vks_vertex, r);
 
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 	vertexInputInfo.vertexBindingDescriptionCount = 1;
 	vertexInputInfo.pVertexBindingDescriptions = &bindingDesc;
-	vertexInputInfo.vertexAttributeDescriptionCount = 2;
+	vertexInputInfo.vertexAttributeDescriptionCount = 3;
 	vertexInputInfo.pVertexAttributeDescriptions = attrDescs;
 
-	/* Input assembly */
+	/* Input assembly: triangle lists (quads/lines/pixels all emit triangles). */
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-	/* Viewport and scissor */
-	VkViewport viewport{};
-	viewport.x = 0.0f;
-	viewport.y = 0.0f;
-	viewport.width = static_cast<float>(vk_surface_extent.width);
-	viewport.height = static_cast<float>(vk_surface_extent.height);
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
-
-	VkRect2D scissor{};
-	scissor.offset = {0, 0};
-	scissor.extent = vk_surface_extent;
-
+	/* Viewport and scissor are set dynamically per draw (full screen). */
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewportState.viewportCount = 1;
-	viewportState.pViewports = &viewport;
 	viewportState.scissorCount = 1;
-	viewportState.pScissors = &scissor;
 
-	/* Rasterizer */
+	/* Rasterizer: no culling (2D), 1px lines. */
 	VkPipelineRasterizationStateCreateInfo rasterizer{};
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterizer.depthClampEnable = VK_FALSE;
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -681,11 +719,18 @@ void vks_init_pipeline()
 	multisampling.sampleShadingEnable = VK_FALSE;
 	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-	/* Color blend */
+	/* Color blend: standard alpha. Opaque primitives draw alpha 1 (no change);
+	 * color-key transparency relies on the shader discarding alpha-0 texels. */
 	VkPipelineColorBlendAttachmentState blendAttachment{};
+	blendAttachment.blendEnable = VK_TRUE;
+	blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+	blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 	blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
 		VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-	blendAttachment.blendEnable = VK_FALSE;
 
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
 	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -693,30 +738,41 @@ void vks_init_pipeline()
 	colorBlending.attachmentCount = 1;
 	colorBlending.pAttachments = &blendAttachment;
 
-	/* Depth and stencil */
+	/* Depth disabled for 2D (the attachment still exists for future 3D use). */
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_TRUE;
-	depthStencil.depthWriteEnable = VK_TRUE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+	depthStencil.depthTestEnable = VK_FALSE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
 	depthStencil.depthBoundsTestEnable = VK_FALSE;
 	depthStencil.stencilTestEnable = VK_FALSE;
 
-	/* Dynamic state */
+	/* Dynamic state: viewport + scissor set per frame. */
+	constexpr std::array dynamicStates{
+		VK_DYNAMIC_STATE_VIEWPORT,
+		VK_DYNAMIC_STATE_SCISSOR,
+	};
 	VkPipelineDynamicStateCreateInfo dynamicState{};
 	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dynamicState.dynamicStateCount = 0;
-	dynamicState.pDynamicStates = nullptr;
+	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+	dynamicState.pDynamicStates = dynamicStates.data();
 
-	/* Pipeline layout */
+	/* Pipeline layout: texture descriptor set + 16-byte vertex push constant
+	 * (pixel->NDC scale/offset). */
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pushRange.offset = 0;
+	pushRange.size = sizeof(float) * 4;
+
 	VkPipelineLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	layoutInfo.setLayoutCount = 1;
 	layoutInfo.pSetLayouts = &vk_descriptor_set_layout;
-	layoutInfo.pushConstantRangeCount = 0;
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &pushRange;
 
-	VkResult result = vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_pipeline_layout);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create pipeline layout");;
+	VkResult result = vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_2d_pipeline_layout);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create pipeline layout");
 
 	/* Vertex shader SPIR-V (generated at build time from GLSL) */
 	VkShaderModuleCreateInfo vertexInfo{};
@@ -756,24 +812,25 @@ void vks_init_pipeline()
 	pipelineInfo.pColorBlendState = &colorBlending;
 	pipelineInfo.pDepthStencilState = &depthStencil;
 	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.layout = vk_pipeline_layout;
+	pipelineInfo.layout = vk_2d_pipeline_layout;
 	pipelineInfo.renderPass = vk_render_pass;
 	pipelineInfo.subpass = 0;
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-	result = vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk_render_pipeline);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create graphics pipeline");;
+	result = vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk_2d_pipeline);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create graphics pipeline");
 }
 
 void vks_init_framebuffers(uint32_t width, uint32_t height)
 {
-	vk_framebuffers.resize(3);
+	/* One framebuffer per swapchain image — each must reference its own color
+	 * view so a recorded frame renders into the image it will present. */
+	const auto imageCount = vk_swapchain_image_views.size();
+	vk_framebuffers.resize(imageCount);
 
-	VkImageView attachments[3] = {VK_NULL_HANDLE, vk_depth_image_view, VK_NULL_HANDLE};
-	if (!vk_swapchain_image_views.empty())
-		attachments[0] = vk_swapchain_image_views[vk_current_frame];
+	for (uint32_t i = 0; i < imageCount; i++) {
+		VkImageView attachments[2] = {vk_swapchain_image_views[i], vk_depth_image_view};
 
-	for (uint32_t i = 0; i < 3; i++) {
 		VkFramebufferCreateInfo fbInfo{};
 		fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 		fbInfo.renderPass = vk_render_pass;
@@ -824,37 +881,53 @@ void vks_init_sync_objects()
 	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
 	vk_image_available_semaphores.resize(3);
-	vk_render_finished_semaphores.resize(3);
 	vk_in_flight_fences.resize(3);
 
 	for (size_t i = 0; i < 3; i++) {
 		VkResult result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &vk_image_available_semaphores[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create semaphore");;
-		result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &vk_render_finished_semaphores[i]);
-		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create semaphore");;
 		result = vkCreateFence(vk_device, &fenceInfo, nullptr, &vk_in_flight_fences[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create fence");;
 	}
+
+	/* Present-wait semaphores are per swapchain image, not per frame-in-flight:
+	 * an image is only re-acquired once its previous present has retired, which
+	 * is exactly when its present semaphore is guaranteed free. Indexing them by
+	 * frame trips VUID-vkQueueSubmit-pSignalSemaphores-00067. */
+	vk_present_semaphores.resize(vk_swapchain_images.size());
+	for (auto &sem : vk_present_semaphores) {
+		VkResult result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &sem);
+		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create present semaphore");;
+	}
 }
 
-void vks_wait_for_flight_fence(uint32_t frame)
+void vks_init_descriptor_pool()
 {
-	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[frame], VK_TRUE, UINT64_MAX);
-	vkResetFences(vk_device, 1, &vk_in_flight_fences[frame]);
+	/* One combined-image-sampler descriptor per texture slot. Created once in
+	 * gr_init and persists across resize/swapchain rebuilds, so existing
+	 * textures keep valid descriptor sets when the screen mode changes. */
+	VkDescriptorPoolSize poolSize{};
+	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSize.descriptorCount = VKS_MAX_TEXTURES;
+
+	VkDescriptorPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	poolInfo.maxSets = VKS_MAX_TEXTURES;
+	poolInfo.poolSizeCount = 1;
+	poolInfo.pPoolSizes = &poolSize;
+
+	VkResult result = vkCreateDescriptorPool(vk_device, &poolInfo, nullptr, &vk_descriptor_pool);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create descriptor pool");;
 }
 
-int vks_acquire_next_image()
+void vks_destroy_descriptor_pool()
 {
-	VkResult result = vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
-		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_current_frame);
-
-	if (result == VK_ERROR_OUT_OF_DATE_KHR)
-		return -1;
-	if (result == VK_SUBOPTIMAL_KHR)
-		return 1;
-	if (result != VK_SUCCESS)
-		return -1;
-	return 0;
+	if (vk_descriptor_pool)
+	{
+		vkDestroyDescriptorPool(vk_device, vk_descriptor_pool, nullptr);
+		vk_descriptor_pool = VK_NULL_HANDLE;
+	}
 }
 
 void vks_shutdown()
@@ -862,10 +935,11 @@ void vks_shutdown()
 	vkDeviceWaitIdle(vk_device);
 
 	vks_shutdown_textures();
+	vks_destroy_descriptor_pool();
 
 	for (auto &fence : vk_in_flight_fences)
 		vkDestroyFence(vk_device, fence, nullptr);
-	for (auto &sem : vk_render_finished_semaphores)
+	for (auto &sem : vk_present_semaphores)
 		vkDestroySemaphore(vk_device, sem, nullptr);
 	for (auto &sem : vk_image_available_semaphores)
 		vkDestroySemaphore(vk_device, sem, nullptr);
@@ -879,19 +953,17 @@ void vks_shutdown()
 	if (vk_depth_image)
 		vkDestroyImage(vk_device, vk_depth_image, nullptr);
 
-	if (vk_vertex_buffer_memory)
-		vkFreeMemory(vk_device, vk_vertex_buffer_memory, nullptr);
-	if (vk_vertex_buffer)
-		vkDestroyBuffer(vk_device, vk_vertex_buffer, nullptr);
+	vks_destroy_white_texture();
+	vks_destroy_vertex_buffers();
 
 	if (vk_fragment_shader)
 		vkDestroyShaderModule(vk_device, vk_fragment_shader, nullptr);
 	if (vk_vertex_shader)
 		vkDestroyShaderModule(vk_device, vk_vertex_shader, nullptr);
-	if (vk_render_pipeline)
-		vkDestroyPipeline(vk_device, vk_render_pipeline, nullptr);
-	if (vk_pipeline_layout)
-		vkDestroyPipelineLayout(vk_device, vk_pipeline_layout, nullptr);
+	if (vk_2d_pipeline)
+		vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
+	if (vk_2d_pipeline_layout)
+		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
 	if (vk_render_pass)
 		vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
 	if (vk_swapchain)
@@ -919,51 +991,49 @@ void vks_shutdown()
 
 namespace dcx {
 
-void vks_start_frame(grs_canvas &)
+/* Maximum frames buffered on the GPU. Must be strictly less than the swapchain
+ * image count (3) so that, by the time a frame index recycles and its
+ * render-finished semaphore is re-signaled, the swapchain has already consumed
+ * that semaphore in the matching present. Reusing it with no slack trips
+ * VUID-vkQueueSubmit-pSignalSemaphores-00067. Each frame owns its fence, two
+ * semaphores, and a command buffer, all indexed by vk_current_frame. */
+constexpr uint32_t VK_MAX_FRAMES_IN_FLIGHT = 2;
+
+/* True while the current frame's command buffer is recording and its render
+ * pass is open. Draw calls append to it; vks_present_frame() closes it. */
+static bool vk_frame_recording = false;
+
+/* Begin a new frame: recycle the per-frame command buffer, acquire the next
+ * swapchain image (into vk_image_index, distinct from the frame index), and
+ * open a render pass that clears color and depth. Returns false if the
+ * swapchain is out of date, so the caller can skip submit/present and let
+ * the resize path (gr_set_mode) rebuild it. */
+static bool vks_begin_frame()
 {
-	/* Wait for the previous frame's GPU work to complete, then reset the fence */
 	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
 	vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
 
-	/* Acquire the next swapchain image for rendering */
+	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
+	if (vk_current_frame < vk_frame_vbs.size())
+		vk_frame_vbs[vk_current_frame].offset = 0;
+
 	VkResult result = vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
-		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_current_frame);
+		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_image_index);
 
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-		return;
-	if (result != VK_SUCCESS)
+	if (result == VK_ERROR_OUT_OF_DATE_KHR)
+		return false;
+	if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
 		Error("Vulkan: Failed to acquire next swapchain image");
-}
 
-void vks_end_frame()
-{
-	/* Record a pipeline barrier: PRESENT_SRC_KHR -> UNDEFINED (discard old content) */
-	VkCommandBuffer cmdBuffer = vk_command_buffers[0];
+	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
+	vkResetCommandBuffer(cmd, 0);
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
+		Error("Vulkan: Failed to begin command buffer");
 
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	barrier.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-	barrier.dstAccessMask = 0;
-	barrier.image = vk_swapchain_images[vk_current_frame];
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.layerCount = 1;
-
-	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	vkCmdPipelineBarrier(cmdBuffer, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-	/* Begin render pass with clear values */
 	VkClearValue clearValues[2]{};
 	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 	clearValues[1].depthStencil = {1.0f, 0};
@@ -971,28 +1041,84 @@ void vks_end_frame()
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = vk_render_pass;
-	renderPassInfo.framebuffer = vk_framebuffers[vk_current_frame];
+	renderPassInfo.framebuffer = vk_framebuffers[vk_image_index];
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = vk_surface_extent;
 	renderPassInfo.clearValueCount = 2;
 	renderPassInfo.pClearValues = clearValues;
 
-	vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-	vkCmdEndRenderPass(cmdBuffer);
+	vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-	vkEndCommandBuffer(cmdBuffer);
+	vk_frame_recording = true;
+	return true;
+}
 
-	/* Submit the command buffer to the graphics queue */
+/* Called from g3_start_frame at the start of each 3D frame. */
+void vks_start_frame(grs_canvas &)
+{
+	vks_begin_frame();
+}
+
+/* Ensure a frame is recording. Used by 2D draw paths that may run outside a
+ * 3D frame (menus, loading screens) so their draws — and the per-frame clear
+ * — still happen. */
+void vks_ensure_frame()
+{
+	if (!vk_frame_recording)
+		vks_begin_frame();
+}
+
+void vks_end_frame()
+{
+	/* Intentionally a no-op: the render pass stays open so 2D overlays drawn
+	 * after the 3D scene (HUD, menus) record into the same command buffer. It
+	 * is closed and submitted by vks_present_frame(). */
+}
+
+/* Close the render pass, submit the frame's command buffer, and present. This
+ * is the entire body of gr_flip(). */
+void vks_present_frame()
+{
+	if (!vk_frame_recording && !vks_begin_frame())
+		return;
+
+	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
+
+	vkCmdEndRenderPass(cmd);
+	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+		Error("Vulkan: Failed to end command buffer");
+	vk_frame_recording = false;
+
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	submitInfo.waitSemaphoreCount = 1;
+	submitInfo.pWaitSemaphores = &vk_image_available_semaphores[vk_current_frame];
+	submitInfo.pWaitDstStageMask = &waitStage;
 	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuffer;
+	submitInfo.pCommandBuffers = &cmd;
 	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &vk_render_finished_semaphores[vk_current_frame];
+	submitInfo.pSignalSemaphores = &vk_present_semaphores[vk_image_index];
 
 	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, vk_in_flight_fences[vk_current_frame]);
-	if (!(result == VK_SUCCESS))
+	if (result != VK_SUCCESS)
 		Error("Vulkan: Failed to submit render commands");
+
+	VkPresentInfoKHR presentInfo{};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = &vk_present_semaphores[vk_image_index];
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &vk_swapchain;
+	presentInfo.pImageIndices = &vk_image_index;
+
+	result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		return;
+	if (result != VK_SUCCESS)
+		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed");
+
+	vk_current_frame = (vk_current_frame + 1) % VK_MAX_FRAMES_IN_FLIGHT;
 }
 
 } /* namespace dcx */

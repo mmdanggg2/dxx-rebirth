@@ -167,6 +167,9 @@ int gr_init()
 	/* Create descriptor set layout */
 	init_descriptor_set_layout();
 
+	/* Descriptor pool — persists across resize (textures outlive swapchain) */
+	vks_init_descriptor_pool();
+
 	/* Set up sync helper */
 	vulkan_sync_helper.init();
 
@@ -214,14 +217,14 @@ int gr_set_mode(screen_mode mode)
 
 		for (auto &fence : vk_in_flight_fences)
 			vkDestroyFence(vk_device, fence, nullptr);
-		for (auto &sem : vk_render_finished_semaphores)
+		for (auto &sem : vk_present_semaphores)
 			vkDestroySemaphore(vk_device, sem, nullptr);
 		for (auto &sem : vk_image_available_semaphores)
 			vkDestroySemaphore(vk_device, sem, nullptr);
 		for (auto &fb : vk_framebuffers)
 			vkDestroyFramebuffer(vk_device, fb, nullptr);
-		if (vk_render_pipeline)
-			vkDestroyPipeline(vk_device, vk_render_pipeline, nullptr);
+		if (vk_2d_pipeline)
+			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
 		if (vk_swapchain)
 			vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 		for (auto &view : vk_swapchain_image_views)
@@ -247,8 +250,13 @@ int gr_set_mode(screen_mode mode)
 	vks_init_framebuffers(w, h);
 	vks_init_sync_objects();
 
-	/* Recreate vertex buffers */
-	initVertexBuffers();
+	/* Recreate per-frame vertex buffers (sized to the command-buffer set). */
+	vks_destroy_vertex_buffers();
+	vks_init_vertex_buffers();
+
+	/* White texture (flat primitives) persists across resize; create once. */
+	if (vk_white_descriptor_set == VK_NULL_HANDLE)
+		vks_init_white_texture();
 
 	/* Update sync helper */
 	vulkan_sync_helper.init();

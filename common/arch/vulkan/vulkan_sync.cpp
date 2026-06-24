@@ -57,60 +57,6 @@ void vks_sync::deinit()
 	}
 }
 
-void vks_sync::record_frame(uint32_t frame_index)
-{
-	/* Allocate temporary command buffer from the per-frame command pool */
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = vk_command_pools[frame_index % vk_command_pools.size()];
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = 1;
-
-	VkCommandBuffer cmdBuffer;
-	VkResult result = vkAllocateCommandBuffers(vk_device, &allocInfo, &cmdBuffer);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate command buffer");;
-
-	VkCommandBufferBeginInfo beginInfo{};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-	vkBeginCommandBuffer(cmdBuffer, &beginInfo);
-
-	/* Image memory barrier: swapchain image -> COLOR_ATTACHMENT_OPTIMAL */
-	VkImageMemoryBarrier imageBarrier{};
-	imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	imageBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageBarrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	imageBarrier.subresourceRange.levelCount = 1;
-	imageBarrier.subresourceRange.layerCount = 1;
-
-	/* Would need the actual swapchain image index */
-	(void)frame_index;
-	(void)imageBarrier;
-
-	vkEndCommandBuffer(cmdBuffer);
-
-	/* Submit to graphics queue */
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &vk_image_available_semaphores[frame_index];
-	VkPipelineStageFlags waitDstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-		submitInfo.pWaitDstStageMask = &waitDstStage;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuffer;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &vk_render_finished_semaphores[frame_index];
-
-	result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, current_fence);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to submit command buffer");
-
-	vkFreeCommandBuffers(vk_device, vk_command_pools[frame_index % vk_command_pools.size()], 1, &cmdBuffer);
-}
-
 vks_sync vulkan_sync_helper;
 
 } /* namespace dcx */

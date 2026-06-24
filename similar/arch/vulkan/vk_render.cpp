@@ -34,6 +34,7 @@
 
 #include <SDL.h>
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -74,27 +75,45 @@ void vks_init_state()
 	vks_init_palette();
 }
 
-/* Swap buffers — present the rendered frame to the screen */
-void vks_swap_buffers_internal(void)
-{
-	/* Present the completed frame to the swapchain */
-	VkPresentInfoKHR presentInfo{};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &vk_render_finished_semaphores[vk_current_frame];
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &vk_swapchain;
-	presentInfo.pImageIndices = &vk_current_frame;
-	presentInfo.pResults = nullptr;
+/* --- 2D draw helpers -------------------------------------------------------- */
 
-	VkResult result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-		return;
-	if (result != VK_SUCCESS)
-		con_puts(CON_URGENT, "Vulkan: vkQueuePresentKHR failed");
+/* Bind the 2D pipeline and set the full-screen viewport, scissor, and
+ * pixel->NDC push constant. Canvas-local coordinates are folded into the
+ * vertex positions by each caller (adding canvas.cv_bitmap.bm_x/y), matching
+ * the OpenGL backend which normalizes absolute coordinates against the full
+ * screen via glOrtho(0,1). */
+static void vks_prepare_2d()
+{
+	vks_ensure_frame();
+	VkCommandBuffer cmd = vks_get_command_buffer();
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline);
+	const float w = static_cast<float>(last_width);
+	const float h = static_cast<float>(last_height);
+	const VkViewport viewport{0.0f, 0.0f, w, h, 0.0f, 1.0f};
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	const VkRect2D scissor{{0, 0}, {last_width, last_height}};
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+	const float push[4] = {2.0f / w, 2.0f / h, -1.0f, -1.0f};
+	vkCmdPushConstants(cmd, vk_2d_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
 }
 
-/* gr_flip — the main display function */
+/* Allocate `count` vertices from the current frame's buffer, copy them in,
+ * bind the descriptor set + vertex buffer, and draw. */
+static void vks_emit(VkDescriptorSet ds, const vks_vertex *src, uint32_t count)
+{
+	VkCommandBuffer cmd = vks_get_command_buffer();
+	vks_vertex_alloc alloc = vks_alloc_vertices(count);
+	std::memcpy(alloc.vertices, src, count * sizeof(vks_vertex));
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline_layout, 0, 1, &ds, 0, nullptr);
+	VkDeviceSize offset = alloc.offset;
+	vkCmdBindVertexBuffers(cmd, 0, 1, &alloc.buffer, &offset);
+	vkCmdDraw(cmd, count, 1, 0, 0);
+}
+
+/* gr_flip — the main display function. Closes and submits the current frame's
+ * command buffer, presents the swapchain image, and advances to the next
+ * in-flight frame. All draw submission/synchronization lives in
+ * vks_present_frame() (vulkan_init.cpp). */
 void gr_flip(void)
 {
 #if DXX_USE_STEREOSCOPIC_RENDER
@@ -104,18 +123,26 @@ void gr_flip(void)
 	}
 #endif
 
-	vks_swap_buffers_internal();
+	vks_present_frame();
 }
 
 /* Pixel drawing */
-void vks_upixelc(const grs_bitmap &cv_bitmap, unsigned x, unsigned y, const color_palette_index c)
+void vks_upixelc(const grs_bitmap &/*cv_bitmap*/, unsigned x, unsigned y, const color_palette_index c)
 {
-	/* Vulkan would render this via a draw call with a small quad or point */
-	(void)cv_bitmap;
-	(void)x;
-	(void)y;
-	(void)c;
-	/* Placeholder: actual implementation would record to command buffer */
+	const auto &col = vks_palette_colors[c];
+	const float fx = static_cast<float>(x);
+	const float fy = static_cast<float>(y);
+	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
+	const vks_vertex v[6] = {
+		{fx,     fy,     0.f, 0.f, cr, cg, cb, ca},
+		{fx + 1.f, fy,     0.f, 0.f, cr, cg, cb, ca},
+		{fx + 1.f, fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+		{fx,     fy,     0.f, 0.f, cr, cg, cb, ca},
+		{fx + 1.f, fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+		{fx,     fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+	};
+	vks_prepare_2d();
+	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
 color_palette_index vks_ugpixel(const grs_bitmap &bitmap, unsigned x, unsigned y)
@@ -130,37 +157,80 @@ color_palette_index vks_ugpixel(const grs_bitmap &bitmap, unsigned x, unsigned y
 /* Rectangle drawing */
 void vks_urect(grs_canvas &canvas, int left, int top, int right, int bot, color_palette_index c)
 {
-	(void)canvas;
-	(void)left;
-	(void)top;
-	(void)right;
-	(void)bot;
-	(void)c;
-	/* Placeholder: would submit a quad draw */
+	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x);
+	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y);
+	const float x0 = left + ox, y0 = top + oy;
+	const float x1 = right + ox, y1 = bot + oy;
+	const auto &col = vks_palette_colors[c];
+	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
+	const vks_vertex v[6] = {
+		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y1, 0.f, 0.f, cr, cg, cb, ca},
+		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y1, 0.f, 0.f, cr, cg, cb, ca},
+		{x0, y1, 0.f, 0.f, cr, cg, cb, ca},
+	};
+	vks_prepare_2d();
+	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
-/* Bitmap drawing */
+/* Bitmap drawing. The 2-arg (array) overload is the real implementation; the
+ * int and fill variants delegate to it (stereo is not implemented). */
 bool vks_ubitmapm_cs(grs_canvas &canvas, int x, int y, int dw, int dh, grs_bitmap &bm, int c)
 {
-	(void)canvas;
-	(void)x;
-	(void)y;
-	(void)dw;
-	(void)dh;
-	(void)bm;
-	(void)c;
-	return true;
+	vks_colors colors;
+	return vks_ubitmapm_cs(canvas, x, y, dw, dh, bm, colors.init(c));
 }
 
-bool vks_ubitmapm_cs(grs_canvas &canvas, int x, int y, int dw, int dh, grs_bitmap &bm, const vks_colors::array_type &c, bool /*fill*/)
+bool vks_ubitmapm_cs(grs_canvas &canvas, int x0, int y0, int dw, int dh, grs_bitmap &bm, const vks_colors::array_type &c, bool /*fill*/)
 {
-	(void)canvas;
-	(void)x;
-	(void)y;
-	(void)dw;
-	(void)dh;
-	(void)bm;
-	(void)c;
+	return vks_ubitmapm_cs(canvas, x0, y0, dw, dh, bm, c);
+}
+
+bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int dw, const int dh, grs_bitmap &bm, const vks_colors::array_type &color_array)
+{
+	/* Upload on demand (mirrors ogl_bindbmtex). The upload walks to the root
+	 * bitmap, so the live texture hangs off the root — look it up there. */
+	grs_bitmap *root = &bm;
+	while (root->bm_parent)
+		root = root->bm_parent;
+	if (!root->vktexture)
+		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
+	vks_texture *tex = root->vktexture;
+	if (!tex)
+		return false;
+
+	/* Destination size: -1 => fill canvas, 0 => source bitmap size. */
+	const int ew = (dw == vulkan_bitmap_use_dst_canvas) ? canvas.cv_bitmap.bm_w
+		: (dw == 0) ? bm.bm_w : dw;
+	const int eh = (dh == vulkan_bitmap_use_dst_canvas) ? canvas.cv_bitmap.bm_h
+		: (dh == 0) ? bm.bm_h : dh;
+
+	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x);
+	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y);
+	const float xa = x0 + ox, ya = y0 + oy;
+	const float xb = xa + ew, yb = ya + eh;
+
+	/* UVs map bm's sub-rectangle into the root-sized texture image. */
+	const float tw = static_cast<float>(tex->width);
+	const float th = static_cast<float>(tex->height);
+	const float u0 = bm.bm_x / tw;
+	const float u1 = (bm.bm_x + bm.bm_w) / tw;
+	const float v0 = bm.bm_y / th;
+	const float v1 = (bm.bm_y + bm.bm_h) / th;
+
+	const float cr = color_array[0], cg = color_array[1], cb = color_array[2], ca = color_array[3];
+	const vks_vertex verts[6] = {
+		{xa, ya, u0, v0, cr, cg, cb, ca},
+		{xb, ya, u1, v0, cr, cg, cb, ca},
+		{xb, yb, u1, v1, cr, cg, cb, ca},
+		{xa, ya, u0, v0, cr, cg, cb, ca},
+		{xb, yb, u1, v1, cr, cg, cb, ca},
+		{xa, yb, u0, v1, cr, cg, cb, ca},
+	};
+	vks_prepare_2d();
+	vks_emit(tex->descriptor_set, verts, 6);
 	return true;
 }
 
@@ -207,13 +277,42 @@ bool vks_ubitblt(unsigned w, unsigned h, unsigned dx, unsigned dy, unsigned sx, 
 /* Line drawing */
 void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c)
 {
-	(void)canvas;
-	(void)left;
-	(void)top;
-	(void)right;
-	(void)bot;
-	(void)c;
-	/* Placeholder: would submit a line segment draw */
+	const auto &col = vks_palette_colors[c];
+	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
+	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x);
+	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y);
+	const float x0 = left + ox, y0 = top + oy;
+	const float x1 = right + ox, y1 = bot + oy;
+
+	float dx = x1 - x0, dy = y1 - y0;
+	const float len = std::sqrt(dx * dx + dy * dy);
+	if (len < 0.5f) {
+		/* Degenerate: render a single pixel. */
+		const vks_vertex v[6] = {
+			{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+			{x0 + 1.f, y0, 0.f, 0.f, cr, cg, cb, ca},
+			{x0 + 1.f, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+			{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+			{x0 + 1.f, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+			{x0, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+		};
+		vks_prepare_2d();
+		vks_emit(vk_white_descriptor_set, v, 6);
+		return;
+	}
+	/* Unit perpendicular, half-width 0.5 => 1px-thick line. */
+	const float px = -dy / len * 0.5f;
+	const float py = dx / len * 0.5f;
+	const vks_vertex v[6] = {
+		{x0 + px, y0 + py, 0.f, 0.f, cr, cg, cb, ca},
+		{x1 + px, y1 + py, 0.f, 0.f, cr, cg, cb, ca},
+		{x1 - px, y1 - py, 0.f, 0.f, cr, cg, cb, ca},
+		{x0 + px, y0 + py, 0.f, 0.f, cr, cg, cb, ca},
+		{x1 - px, y1 - py, 0.f, 0.f, cr, cg, cb, ca},
+		{x0 - px, y0 - py, 0.f, 0.f, cr, cg, cb, ca},
+	};
+	vks_prepare_2d();
+	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
 /* 3D texture-mapped polygon drawing */
@@ -291,21 +390,11 @@ void gr_palette_load(const palette_array_t &pal)
 	vks_init_palette();
 }
 
-/* Font rendering — Vulkan equivalent of ogl_internal_string */
-void vks_internal_string(grs_canvas &canvas, const grs_font &cv_font, int entry_x, int yy, const char *const s)
-{
-	/* Placeholder: would render text using Vulkan-textured quads */
-	(void)canvas;
-	(void)cv_font;
-	(void)entry_x;
-	(void)yy;
-	(void)s;
-}
+/* Font string rendering (vks_internal_string) lives in font.cpp, alongside
+ * ogl_internal_string, so it can reuse the shared glyph-layout helpers
+ * (FONTSCALE_X, get_char_width, font_character_extent, ...). */
 
-void vks_init_font(const grs_font * /*font*/)
-{
-	/* Placeholder: Vulkan font texture initialization */
-}
+/* vks_init_font lives in font.cpp (it needs the glyph-atlas helpers). */
 
 } /* namespace dcx */
 

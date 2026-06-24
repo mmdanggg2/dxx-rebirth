@@ -50,10 +50,15 @@ extern VkFormat vk_swapchain_format;
 extern VkFormat vk_depth_format;
 
 /* Pipeline and render pass */
-extern VkPipeline vk_render_pipeline;
+extern VkPipeline vk_2d_pipeline;
 extern VkRenderPass vk_render_pass;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
-extern VkPipelineLayout vk_pipeline_layout;
+extern VkPipelineLayout vk_2d_pipeline_layout;
+extern VkDescriptorPool vk_descriptor_pool;
+
+/* 1x1 white texture descriptor set, bound for flat primitives (rect/line/pixel)
+ * so a single textured pipeline serves every 2D draw. */
+extern VkDescriptorSet vk_white_descriptor_set;
 
 /* Shader modules */
 extern VkShaderModule vk_vertex_shader;
@@ -64,11 +69,13 @@ extern std::vector<VkFramebuffer> vk_framebuffers;
 extern std::vector<VkCommandBuffer> vk_command_buffers;
 extern std::vector<VkCommandPool> vk_command_pools;
 extern std::vector<VkSemaphore> vk_image_available_semaphores;
-extern std::vector<VkSemaphore> vk_render_finished_semaphores;
+extern std::vector<VkSemaphore> vk_present_semaphores;
 extern std::vector<VkFence> vk_in_flight_fences;
 
-/* Current frame index */
+/* Current in-flight frame index (cycles 0..MAX_FRAMES-1, owns fence/semaphores/cmd buffer) */
 extern uint32_t vk_current_frame;
+/* Index of the swapchain image acquired for the current frame (differs from vk_current_frame) */
+extern uint32_t vk_image_index;
 
 /* Initialization */
 void vks_init_instance(SDL_Window *sdl_window);
@@ -85,13 +92,37 @@ void vks_init_framebuffers(uint32_t width, uint32_t height);
 void vks_init_command_buffers();
 void vks_init_sync_objects();
 void vks_init_state();
+void vks_init_descriptor_pool();
+void vks_destroy_descriptor_pool();
 
 /* Depth resources */
 extern VkImage vk_depth_image;
 extern VkDeviceMemory vk_depth_image_memory;
 extern VkImageView vk_depth_image_view;
 void initDepthResources();
-void initVertexBuffers();
+
+/* Per-frame vertex buffers (host-visible, persistently mapped). 2D draw
+ * functions append vertices into the current frame's buffer; the write cursor
+ * resets at the start of each frame once that frame's fence has retired. */
+struct vks_vertex
+{
+	float x, y;       /* absolute screen pixel coordinates */
+	float u, v;       /* texture coordinates */
+	float r, g, b, a; /* modulating color */
+};
+struct vks_vertex_alloc
+{
+	VkBuffer buffer;
+	VkDeviceSize offset;
+	vks_vertex *vertices; /* writable mapped pointer */
+};
+void vks_init_vertex_buffers();
+void vks_destroy_vertex_buffers();
+/* Reserve `count` vertices in the current frame's buffer and return a writable
+ * pointer plus the bind offset. Caller fills vertices, then binds+draws. */
+vks_vertex_alloc vks_alloc_vertices(uint32_t count);
+/* The command buffer being recorded for the current in-flight frame. */
+VkCommandBuffer vks_get_command_buffer();
 
 
 /* Shutdown */
@@ -103,9 +134,8 @@ void vks_start_frame(grs_canvas &);
 void vks_stereo_frame(bool left_eye, int xoff);
 #endif
 void vks_end_frame();
-void vks_set_screen_mode();
-int vks_acquire_next_image();
-void vks_wait_for_flight_fence(uint32_t frame);
+void vks_ensure_frame();
+void vks_present_frame();
 
 /* Color palette conversion (Vulkan equivalent of ogl_colors) */
 struct vks_colors
@@ -138,7 +168,7 @@ void vks_set_blending(gr_blend);
 
 /* Font rendering (Vulkan equivalent of ogl_internal_string) */
 void vks_internal_string(grs_canvas &, const grs_font &cv_font, int entry_x, int yy, const char *const s);
-void vks_init_font(const grs_font *font);
+/* vks_init_font is file-local in font.cpp (called from gr_init_font). */
 
 } /* namespace dcx */
 

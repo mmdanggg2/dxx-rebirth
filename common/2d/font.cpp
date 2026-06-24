@@ -768,10 +768,93 @@ static unsigned vks_font_get_total_width(const grs_font &font)
 	return *rwh;
 }
 
-static void vks_init_font(grs_font *const /*font*/)
+/* Build the glyph atlas (ft_parent_bitmap) + one sub-bitmap per glyph
+ * (ft_bitmaps), mirroring ogl_init_font. Unlike OpenGL, no texture is created
+ * or uploaded here: vks_ubitmapm_cs uploads ft_parent_bitmap on demand when a
+ * glyph is first drawn, and walks each sub-bitmap to the parent for UVs. */
+static void vks_init_font(grs_font *const font)
 {
-	/* Vulkan font initialization — stub. Actual font texture management
-	 * is handled by the Vulkan renderer via dcx::vks_* functions. */
+	const unsigned nchars = font->ft_maxchar - font->ft_minchar + 1;
+	constexpr uint8_t gap{1};	// x/y offset between chars so filtering keeps borders clean
+	const auto [tw, th]{vks_font_choose_size(font, gap)};
+	{
+		RAIIdmem<uint8_t[]> data;
+		const unsigned length{tw * th};
+		MALLOC(data, uint8_t[], length);
+		std::fill_n(data.get(), length, TRANSPARENCY_COLOR); // fill with transparency so gaps don't bleed
+		gr_init_main_bitmap(font->ft_parent_bitmap, bm_mode::linear, 0, 0, tw, th, tw, std::move(data));
+	}
+	gr_set_transparent(font->ft_parent_bitmap, 1);
+
+	font->ft_bitmaps = std::make_unique<grs_bitmap[]>(nchars);
+	const auto h{font->ft_h};
+
+	uint16_t curx{};
+	uint16_t cury{};
+	for (const auto i : xrange(nchars))
+	{
+		const auto w{
+			(font->ft_flags & FT_PROPORTIONAL)
+			? font->ft_widths[i]
+			: font->ft_w
+		};
+
+		if (std::cmp_less(w, 1u))
+			continue;
+		if (std::cmp_greater(w, 256u))
+			continue;
+
+		if (std::cmp_greater(unsigned{curx} + w + gap, tw))
+		{
+			const unsigned next_y{unsigned{cury} + h + gap};
+			if (!std::in_range<uint16_t>(next_y) || std::cmp_greater(next_y + h, th))
+			{
+				std::array<char, 124> buf;
+				const auto written{std::snprintf(std::data(buf), std::size(buf), "failed to fit font: i=%u, nchars=%u, h=%hu, cury=%hu", i, nchars, h, cury)};
+				throw std::runtime_error(std::string{std::data(buf), written > 0 ? std::min<unsigned>(std::size(buf), written) : 0});
+			}
+			cury = next_y;
+			curx=0;
+		}
+
+		if (font->ft_flags & FT_COLOR)
+		{
+			const auto fp{(font->ft_flags & FT_PROPORTIONAL)
+				? font->ft_chars[i]
+				: font->ft_data + i * w*h};
+			for (const auto y : xrange(h))
+			{
+				for (const auto x : xrange(w))
+					font->ft_parent_bitmap.get_bitmap_data()[curx+x+(cury+y)*tw] = fp[x+y*w];
+			}
+		}
+		else
+		{
+			auto white{gr_find_closest_color(63, 63, 63)};
+			auto fp{(font->ft_flags & FT_PROPORTIONAL)
+				? font->ft_chars[i]
+				: font->ft_data + i * BITS_TO_BYTES(w)*h};
+			for (const auto y : xrange(h))
+			{
+				uint8_t BitMask{};
+				uint8_t bits{};
+				for (const auto x : xrange(w))
+				{
+					if (BitMask==0) {
+						bits = *fp++;
+						BitMask = 0x80;
+					}
+
+					font->ft_parent_bitmap.get_bitmap_data()[curx+x+(cury+y)*tw] = (bits & BitMask)
+						? white
+						: 255;
+					BitMask >>= 1;
+				}
+			}
+		}
+		gr_init_sub_bitmap(font->ft_bitmaps[i], font->ft_parent_bitmap, {curx}, {cury}, {w}, {h});
+		curx+=w+gap;
+	}
 }
 
 static void vks_internal_string_fn(grs_canvas &canvas, const grs_font &cv_font, const int entry_x, int yy, const char *const s)
@@ -803,6 +886,71 @@ static grs_disk_font grs_disk_font_read(NamedPHYSFS_File fp)
 }
 
 }
+
+#if DXX_USE_VULKAN
+/* Vulkan font string renderer. Mirrors ogl_internal_string (above) but issues
+ * textured-quad draws via vks_ubitmapm_cs; each glyph bitmap is uploaded on
+ * demand. Defined here — not in vk_render.cpp — so it can reuse the shared
+ * glyph-layout helpers (FONTSCALE_X, get_char_width, font_character_extent,
+ * CHECK_EMBEDDED_COLORS, ...). */
+void vks_internal_string(grs_canvas &canvas, const grs_font &cv_font, const int entry_x, int yy, const char *const s)
+{
+	auto orig_color{canvas.cv_font_fg_color};	//to allow easy reseting to default string color with colored strings -MPM
+
+	if (grd_curscreen->sc_canvas.cv_bitmap.get_type() != bm_mode::vulkan)
+		Error("carp.\n");
+	const auto &&fspacy1{FSPACY(1)};
+	const font_character_extent INFONT{cv_font};
+	const auto &&fontscale_x{FONTSCALE_X()};
+	const auto &&FONTSCALE_Y_ft_h{FONTSCALE_Y(cv_font.ft_h)};
+	vks_colors colors;
+	for (auto next_row{s}; next_row;)
+	{
+		auto text_ptr{std::exchange(next_row, nullptr)};
+		auto line_x{entry_x == 0x8000
+			? get_centered_x(canvas, cv_font, text_ptr)
+			: entry_x};
+
+		for (; const auto c0{*text_ptr};)
+		{
+			if (c0 == '\n')
+			{
+				next_row = &text_ptr[1];
+				yy += FONTSCALE_Y_ft_h + fspacy1;
+				break;
+			}
+
+			const auto letter{c0 - cv_font.ft_minchar};
+			const auto spacing{get_char_width<int>(cv_font, c0, text_ptr[1]).spacing};
+
+			per_character_row_state state;
+			if (!INFONT(letter) || c0 <= 0x06) //not in font, draw as space
+			{
+				CHECK_EMBEDDED_COLORS() else{
+					line_x += spacing;
+					text_ptr++;
+				}
+				if (state.draw_full_width_as_fg_color)
+				{
+					const auto color{canvas.cv_font_fg_color};
+					gr_rect(canvas, line_x, yy + cv_font.ft_baseline + 2, line_x + cv_font.ft_w, yy + cv_font.ft_baseline + 3, color);
+				}
+
+				continue;
+			}
+			const auto ft_w{(cv_font.ft_flags & FT_PROPORTIONAL)
+				? cv_font.ft_widths[letter]
+				: cv_font.ft_w};
+
+			vks_ubitmapm_cs(canvas, line_x, yy, fontscale_x(ft_w), FONTSCALE_Y_ft_h, cv_font.ft_bitmaps[letter], (cv_font.ft_flags & FT_COLOR) ? colors.white : (canvas.cv_bitmap.get_type() == bm_mode::vulkan) ? colors.init(canvas.cv_font_fg_color) : throw std::runtime_error("non-color string to non-vulkan dest"));
+
+			line_x += spacing;
+			text_ptr++;
+		}
+	}
+	(void)orig_color;
+}
+#endif
 
 void gr_string(grs_canvas &canvas, const grs_font &cv_font, const int x, const int y, const char *const s)
 {
