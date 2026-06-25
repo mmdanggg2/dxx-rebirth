@@ -134,8 +134,14 @@ void vks_start_frame(grs_canvas &);
 void vks_stereo_frame(bool left_eye, int xoff);
 #endif
 void vks_end_frame();
-void vks_ensure_frame();
+/* Begin a frame if none is recording. Returns false if the swapchain is
+ * unavailable (out of date); callers must skip drawing when it returns false. */
+bool vks_ensure_frame();
 void vks_present_frame();
+/* Tear down and rebuild swapchain-dependent resources (swapchain, render pass,
+ * depth, pipeline, framebuffers, sync objects, vertex buffers) for a new
+ * extent. Called on startup, resize, and when the swapchain goes out of date. */
+void vks_recreate_swapchain(uint32_t w, uint32_t h);
 
 /* Color palette conversion (Vulkan equivalent of ogl_colors) */
 struct vks_colors

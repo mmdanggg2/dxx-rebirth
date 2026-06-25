@@ -207,67 +207,13 @@ int gr_set_mode(screen_mode mode)
 		grd_curscreen->get_screen_height() * CGameCfg.AspectY);
 	gr_init_canvas(grd_curscreen->sc_canvas, gr_new_bm_data, bm_mode::vulkan, w, h);
 
-	/* Reinitialize Vulkan swapchain */
-	vk_surface_extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
 
-	/* Destroy old swapchain and related resources */
-	if (vk_swapchain) {
-		vulkan_sync_helper.deinit();
-		vkDeviceWaitIdle(vk_device);
-
-		for (auto &fence : vk_in_flight_fences)
-			vkDestroyFence(vk_device, fence, nullptr);
-		for (auto &sem : vk_present_semaphores)
-			vkDestroySemaphore(vk_device, sem, nullptr);
-		for (auto &sem : vk_image_available_semaphores)
-			vkDestroySemaphore(vk_device, sem, nullptr);
-		for (auto &fb : vk_framebuffers)
-			vkDestroyFramebuffer(vk_device, fb, nullptr);
-		if (vk_2d_pipeline)
-			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
-		if (vk_swapchain)
-			vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
-		for (auto &view : vk_swapchain_image_views)
-			vkDestroyImageView(vk_device, view, nullptr);
-		vk_swapchain_image_views.clear();
-		if (vk_depth_image_view)
-			vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
-		if (vk_depth_image_memory)
-			vkFreeMemory(vk_device, vk_depth_image_memory, nullptr);
-		if (vk_depth_image)
-			vkDestroyImage(vk_device, vk_depth_image, nullptr);
-		if (vk_render_pass)
-			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
-	}
-
-	/* Recreate swapchain */
-	vks_init_swapchain(w, h);
-	vks_init_render_pass();
-	initDepthResources();
-	vks_init_command_buffers();
-	vks_init_pipeline();
-	vks_init_swapchain_image_views();
-	vks_init_framebuffers(w, h);
-	vks_init_sync_objects();
-
-	/* Recreate per-frame vertex buffers (sized to the command-buffer set). */
-	vks_destroy_vertex_buffers();
-	vks_init_vertex_buffers();
-
-	/* White texture (flat primitives) persists across resize; create once. */
-	if (vk_white_descriptor_set == VK_NULL_HANDLE)
-		vks_init_white_texture();
-
-	/* Update sync helper */
-	vulkan_sync_helper.init();
+	vks_recreate_swapchain(w, h);
 
 	/* Initialize rendering state */
 	vks_init_state();
 	gamefont_choose_game_font(w, h);
 	gr_remap_color_fonts();
-
-	last_width = w;
-	last_height = h;
 
 #if DXX_USE_STEREOSCOPIC_RENDER
 	// gr_set_stereo_mode_sync();

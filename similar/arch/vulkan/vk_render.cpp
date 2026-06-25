@@ -82,9 +82,10 @@ void vks_init_state()
  * vertex positions by each caller (adding canvas.cv_bitmap.bm_x/y), matching
  * the OpenGL backend which normalizes absolute coordinates against the full
  * screen via glOrtho(0,1). */
-static void vks_prepare_2d()
+static bool vks_prepare_2d()
 {
-	vks_ensure_frame();
+	if (!vks_ensure_frame())
+		return false;
 	VkCommandBuffer cmd = vks_get_command_buffer();
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline);
 	const float w = static_cast<float>(last_width);
@@ -95,6 +96,7 @@ static void vks_prepare_2d()
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 	const float push[4] = {2.0f / w, 2.0f / h, -1.0f, -1.0f};
 	vkCmdPushConstants(cmd, vk_2d_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
+	return true;
 }
 
 /* Allocate `count` vertices from the current frame's buffer, copy them in,
@@ -141,7 +143,8 @@ void vks_upixelc(const grs_bitmap &/*cv_bitmap*/, unsigned x, unsigned y, const 
 		{fx + 1.f, fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
 		{fx,     fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
 	};
-	vks_prepare_2d();
+	if (!vks_prepare_2d())
+		return;
 	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
@@ -171,7 +174,8 @@ void vks_urect(grs_canvas &canvas, int left, int top, int right, int bot, color_
 		{x1, y1, 0.f, 0.f, cr, cg, cb, ca},
 		{x0, y1, 0.f, 0.f, cr, cg, cb, ca},
 	};
-	vks_prepare_2d();
+	if (!vks_prepare_2d())
+		return;
 	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
@@ -229,7 +233,8 @@ bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int d
 		{xb, yb, u1, v1, cr, cg, cb, ca},
 		{xa, yb, u0, v1, cr, cg, cb, ca},
 	};
-	vks_prepare_2d();
+	if (!vks_prepare_2d())
+		return false;
 	vks_emit(tex->descriptor_set, verts, 6);
 	return true;
 }
@@ -296,7 +301,8 @@ void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c
 			{x0 + 1.f, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
 			{x0, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
 		};
-		vks_prepare_2d();
+		if (!vks_prepare_2d())
+			return;
 		vks_emit(vk_white_descriptor_set, v, 6);
 		return;
 	}
@@ -311,7 +317,8 @@ void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c
 		{x1 - px, y1 - py, 0.f, 0.f, cr, cg, cb, ca},
 		{x0 - px, y0 - py, 0.f, 0.f, cr, cg, cb, ca},
 	};
-	vks_prepare_2d();
+	if (!vks_prepare_2d())
+		return;
 	vks_emit(vk_white_descriptor_set, v, 6);
 }
 

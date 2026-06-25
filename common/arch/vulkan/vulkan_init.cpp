@@ -10,6 +10,7 @@
 
 #include "vulkan_init.h"
 #include "vulkan_textures.h"
+#include "vulkan_sync.h"
 #include "vulkan/shaders/generated.h"
 #include "window.h"
 #include "error.h"
@@ -1003,6 +1004,72 @@ constexpr uint32_t VK_MAX_FRAMES_IN_FLIGHT = 2;
  * pass is open. Draw calls append to it; vks_present_frame() closes it. */
 static bool vk_frame_recording = false;
 
+/* Set when acquire/present reports the swapchain out of date (or suboptimal);
+ * vks_begin_frame rebuilds it before the next acquire. */
+static bool vk_need_recreate = false;
+
+/* Query the current surface extent from the physical device. On Wayland the
+ * surface reports an undefined extent (0xFFFFFFFF), so fall back to the last
+ * known size. */
+static VkExtent2D vks_query_surface_extent()
+{
+	VkSurfaceCapabilitiesKHR caps{};
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, vk_surface, &caps);
+	if (caps.currentExtent.width != UINT32_MAX && caps.currentExtent.height != UINT32_MAX)
+		return caps.currentExtent;
+	return vk_surface_extent;
+}
+
+void vks_recreate_swapchain(uint32_t w, uint32_t h)
+{
+	if (vk_swapchain) {
+		vulkan_sync_helper.deinit();
+		vkDeviceWaitIdle(vk_device);
+
+		for (auto &fence : vk_in_flight_fences)
+			vkDestroyFence(vk_device, fence, nullptr);
+		for (auto &sem : vk_present_semaphores)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+		for (auto &sem : vk_image_available_semaphores)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+		for (auto &fb : vk_framebuffers)
+			vkDestroyFramebuffer(vk_device, fb, nullptr);
+		if (vk_2d_pipeline)
+			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
+		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
+		vk_swapchain = VK_NULL_HANDLE;
+		for (auto &view : vk_swapchain_image_views)
+			vkDestroyImageView(vk_device, view, nullptr);
+		vk_swapchain_image_views.clear();
+		if (vk_depth_image_view)
+			vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
+		if (vk_depth_image_memory)
+			vkFreeMemory(vk_device, vk_depth_image_memory, nullptr);
+		if (vk_depth_image)
+			vkDestroyImage(vk_device, vk_depth_image, nullptr);
+		if (vk_render_pass)
+			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
+	}
+
+	vk_surface_extent = {w, h};
+	vks_init_swapchain(w, h);
+	vks_init_render_pass();
+	initDepthResources();
+	vks_init_command_buffers();
+	vks_init_pipeline();
+	vks_init_swapchain_image_views();
+	vks_init_framebuffers(w, h);
+	vks_init_sync_objects();
+	vks_destroy_vertex_buffers();
+	vks_init_vertex_buffers();
+	if (vk_white_descriptor_set == VK_NULL_HANDLE)
+		vks_init_white_texture();
+
+	vulkan_sync_helper.init();
+	last_width = w;
+	last_height = h;
+}
+
 /* Begin a new frame: recycle the per-frame command buffer, acquire the next
  * swapchain image (into vk_image_index, distinct from the frame index), and
  * open a render pass that clears color and depth. Returns false if the
@@ -1010,8 +1077,20 @@ static bool vk_frame_recording = false;
  * the resize path (gr_set_mode) rebuild it. */
 static bool vks_begin_frame()
 {
+	/* If the swapchain was reported out of date (by a prior acquire or
+	 * present), rebuild it before attempting to acquire again. */
+	if (vk_need_recreate) {
+		const auto ext = vks_query_surface_extent();
+		vks_recreate_swapchain(ext.width, ext.height);
+		vk_need_recreate = false;
+		vk_frame_recording = false;
+	}
+
+	/* Wait for this frame slot's previous submission to retire. The fence
+	 * is reset only after a successful acquire below, so a failed acquire
+	 * leaves it signaled and this wait returns immediately next time
+	 * (no deadlock). */
 	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
-	vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
 
 	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
 	if (vk_current_frame < vk_frame_vbs.size())
@@ -1020,10 +1099,27 @@ static bool vks_begin_frame()
 	VkResult result = vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
 		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_image_index);
 
-	if (result == VK_ERROR_OUT_OF_DATE_KHR)
+	if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+		vk_need_recreate = true;
 		return false;
-	if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
-		Error("Vulkan: Failed to acquire next swapchain image");
+	}
+	if (result == VK_SUBOPTIMAL_KHR)
+		vk_need_recreate = true;
+	if (result != VK_SUCCESS) {
+		con_printf(CON_URGENT, "Vulkan: vkAcquireNextImageKHR returned %d", static_cast<int>(result));
+		if (result == VK_ERROR_SURFACE_LOST_KHR || result == VK_ERROR_DEVICE_LOST ||
+			result == VK_ERROR_TOO_MANY_OBJECTS || result == VK_ERROR_OUT_OF_HOST_MEMORY ||
+			result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+			vk_need_recreate = true;
+			return false;
+		}
+		Error("Vulkan: Failed to acquire next swapchain image (result=%d)", static_cast<int>(result));
+	}
+
+	/* Now that we hold a valid image, reset the fence for this frame's
+	 * upcoming submit. On a failed acquire above this fence stays signaled,
+	 * preventing the next begin_frame from hanging. */
+	vkResetFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame]);
 
 	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
 	vkResetCommandBuffer(cmd, 0);
@@ -1062,24 +1158,23 @@ void vks_start_frame(grs_canvas &)
 /* Ensure a frame is recording. Used by 2D draw paths that may run outside a
  * 3D frame (menus, loading screens) so their draws — and the per-frame clear
  * — still happen. */
-void vks_ensure_frame()
+/* Ensure a frame is recording. Returns false if the swapchain is unavailable
+ * (out of date); callers must skip drawing when it returns false. Used by 2D
+ * draw paths that may run outside a 3D frame (menus, loading screens) so
+ * their draws — and the per-frame clear — still happen. */
+bool vks_ensure_frame()
 {
 	if (!vk_frame_recording)
-		vks_begin_frame();
-}
-
-void vks_end_frame()
-{
-	/* Intentionally a no-op: the render pass stays open so 2D overlays drawn
-	 * after the 3D scene (HUD, menus) record into the same command buffer. It
-	 * is closed and submitted by vks_present_frame(). */
+		return vks_begin_frame();
+	return true;
 }
 
 /* Close the render pass, submit the frame's command buffer, and present. This
- * is the entire body of gr_flip(). */
+ * is the entire body of gr_flip(). Skips presenting when nothing was drawn;
+ * on swapchain loss flags recreate for the next begin_frame. */
 void vks_present_frame()
 {
-	if (!vk_frame_recording && !vks_begin_frame())
+	if (!vk_frame_recording)
 		return;
 
 	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
@@ -1102,7 +1197,7 @@ void vks_present_frame()
 
 	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, vk_in_flight_fences[vk_current_frame]);
 	if (result != VK_SUCCESS)
-		Error("Vulkan: Failed to submit render commands");
+		con_printf(CON_URGENT, "Vulkan: vkQueueSubmit failed: %d", static_cast<int>(result));
 
 	VkPresentInfoKHR presentInfo{};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1113,13 +1208,23 @@ void vks_present_frame()
 	presentInfo.pImageIndices = &vk_image_index;
 
 	result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+		vk_need_recreate = true;
 		return;
+	}
 	if (result != VK_SUCCESS)
 		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed");
 
 	vk_current_frame = (vk_current_frame + 1) % VK_MAX_FRAMES_IN_FLIGHT;
 }
+
+void vks_end_frame()
+{
+	/* Intentionally a no-op: the render pass stays open so 2D overlays drawn
+	 * after the 3D scene (HUD, menus) record into the same command buffer. It
+	 * is closed and submitted by vks_present_frame(). */
+}
+
 
 } /* namespace dcx */
 
