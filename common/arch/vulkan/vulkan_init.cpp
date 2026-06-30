@@ -228,6 +228,12 @@ struct vks_frame_vb
 };
 static std::vector<vks_frame_vb> vk_frame_vbs;
 static constexpr VkDeviceSize VKS_VB_CAPACITY = 1 << 20; /* 1 MiB (~32k vertices) */
+/* Maximum frames buffered on the GPU. Kept strictly below the swapchain image
+ * count so an image is always free to acquire. The present (render-finished)
+ * semaphore is owned per swapchain image, not per frame: a present binds it to
+ * that image and the spec (VUID-vkQueueSubmit-pSignalSemaphores-00067) forbids
+ * re-signaling until that image is re-acquired — see vks_init_sync_objects(). */
+static constexpr uint32_t VK_MAX_FRAMES_IN_FLIGHT = 2;
 
 /* Find a host-visible, host-coherent memory type for a buffer. */
 static uint32_t find_host_visible_memory_type(VkMemoryRequirements memRequirements)
@@ -848,9 +854,28 @@ void vks_init_framebuffers(uint32_t width, uint32_t height)
 
 void vks_init_command_buffers()
 {
-	vk_command_pools.resize(3);
+	/* Destroy any previously created pools and their buffers (e.g. after a
+	 * resize).  The pools vector holds the old handles; clear() would leave
+	 * the vector empty and the next loop would overwrite indices 0..N-1
+	 * without destroying them. */
+	if (!vk_command_pools.empty()) {
+		/* Free the command buffers BEFORE destroying their pool: destroying a
+		 * pool implicitly frees its buffers, so doing it afterward would touch
+		 * already-destroyed handles. All buffers are allocated from pool[0]
+		 * (see vkAllocateCommandBuffers below). */
+		if (!vk_command_buffers.empty())
+			vkFreeCommandBuffers(vk_device, vk_command_pools[0],
+			                    static_cast<uint32_t>(vk_command_buffers.size()),
+			                    vk_command_buffers.data());
+		for (auto &pool : vk_command_pools)
+			vkDestroyCommandPool(vk_device, pool, nullptr);
+		vk_command_buffers.clear();
+		vk_command_pools.clear();
+	}
 
-	for (uint32_t i = 0; i < 3; i++) {
+	vk_command_pools.resize(VK_MAX_FRAMES_IN_FLIGHT);
+
+	for (uint32_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
 		VkCommandPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		poolInfo.queueFamilyIndex = vk_graphics_queue_family;
@@ -860,7 +885,7 @@ void vks_init_command_buffers()
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create command pool");;
 	}
 
-	vk_command_buffers.resize(3);
+	vk_command_buffers.resize(VK_MAX_FRAMES_IN_FLIGHT);
 
 	VkCommandBufferAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -881,23 +906,37 @@ void vks_init_sync_objects()
 	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-	vk_image_available_semaphores.resize(3);
-	vk_in_flight_fences.resize(3);
+	/* Destroy any previously created semaphores and fences (e.g. after a
+	 * resize). */
+	for (auto &sem : vk_image_available_semaphores)
+		if (sem)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+	for (auto &sem : vk_present_semaphores)
+		if (sem)
+			vkDestroySemaphore(vk_device, sem, nullptr);
+	for (auto &fence : vk_in_flight_fences)
+		if (fence)
+			vkDestroyFence(vk_device, fence, nullptr);
 
-	for (size_t i = 0; i < 3; i++) {
+	/* image-available semaphores and in-flight fences are owned per
+	 * frame-in-flight slot (indexed by vk_current_frame). The present
+	 * semaphore is owned per swapchain image: vkQueuePresentKHR binds it
+	 * to that image, and the spec forbids re-signaling it until the image
+	 * is re-acquired, so it must be indexed by vk_image_index — one per
+	 * swapchain image, not per frame in flight. */
+	vk_image_available_semaphores.resize(VK_MAX_FRAMES_IN_FLIGHT);
+	vk_in_flight_fences.resize(VK_MAX_FRAMES_IN_FLIGHT);
+	const size_t imageCount = vk_swapchain_image_views.size();
+	vk_present_semaphores.resize(imageCount);
+
+	for (size_t i = 0; i < VK_MAX_FRAMES_IN_FLIGHT; i++) {
 		VkResult result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &vk_image_available_semaphores[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create semaphore");;
 		result = vkCreateFence(vk_device, &fenceInfo, nullptr, &vk_in_flight_fences[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create fence");;
 	}
-
-	/* Present-wait semaphores are per swapchain image, not per frame-in-flight:
-	 * an image is only re-acquired once its previous present has retired, which
-	 * is exactly when its present semaphore is guaranteed free. Indexing them by
-	 * frame trips VUID-vkQueueSubmit-pSignalSemaphores-00067. */
-	vk_present_semaphores.resize(vk_swapchain_images.size());
-	for (auto &sem : vk_present_semaphores) {
-		VkResult result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &sem);
+	for (size_t i = 0; i < imageCount; i++) {
+		VkResult result = vkCreateSemaphore(vk_device, &semaphoreInfo, nullptr, &vk_present_semaphores[i]);
 		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create present semaphore");;
 	}
 }
@@ -992,14 +1031,6 @@ void vks_shutdown()
 
 namespace dcx {
 
-/* Maximum frames buffered on the GPU. Must be strictly less than the swapchain
- * image count (3) so that, by the time a frame index recycles and its
- * render-finished semaphore is re-signaled, the swapchain has already consumed
- * that semaphore in the matching present. Reusing it with no slack trips
- * VUID-vkQueueSubmit-pSignalSemaphores-00067. Each frame owns its fence, two
- * semaphores, and a command buffer, all indexed by vk_current_frame. */
-constexpr uint32_t VK_MAX_FRAMES_IN_FLIGHT = 2;
-
 /* True while the current frame's command buffer is recording and its render
  * pass is open. Draw calls append to it; vks_present_frame() closes it. */
 static bool vk_frame_recording = false;
@@ -1026,12 +1057,6 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 		vulkan_sync_helper.deinit();
 		vkDeviceWaitIdle(vk_device);
 
-		for (auto &fence : vk_in_flight_fences)
-			vkDestroyFence(vk_device, fence, nullptr);
-		for (auto &sem : vk_present_semaphores)
-			vkDestroySemaphore(vk_device, sem, nullptr);
-		for (auto &sem : vk_image_available_semaphores)
-			vkDestroySemaphore(vk_device, sem, nullptr);
 		for (auto &fb : vk_framebuffers)
 			vkDestroyFramebuffer(vk_device, fb, nullptr);
 		if (vk_2d_pipeline)
