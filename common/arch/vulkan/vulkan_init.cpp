@@ -1183,6 +1183,16 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
  * the resize path (gr_set_mode) rebuild it. */
 static bool vks_begin_frame()
 {
+	/* A frame may already be recording. A 2D draw (via vks_ensure_frame) can
+	 * precede g3_start_frame within one displayed frame, and a window
+	 * transition can leave the previous frame's pass still open. In both cases
+	 * the 2D and 3D draws must composite into the single open render pass and
+	 * be presented together by gr_flip — the single-buffer-per-frame model the
+	 * software and OpenGL backends use. Starting a fresh pass here would
+	 * orphan and present the in-progress frame, flickering every frame. */
+	if (vk_frame_recording)
+		return true;
+
 	/* If the swapchain was reported out of date (by a prior acquire or
 	 * present), rebuild it before attempting to acquire again. */
 	if (vk_need_recreate) {
@@ -1192,16 +1202,9 @@ static bool vks_begin_frame()
 		vk_frame_recording = false;
 	}
 
-	/* Wait for this frame slot's previous submission to retire. The fence
-	 * is reset only after a successful acquire below, so a failed acquire
-	 * leaves it signaled and this wait returns immediately next time
-	 * (no deadlock). */
-	/* If the previous frame was begun but never presented — which happens when
-	 * the event loop bails before gr_flip() because the front window changed
-	 * mid-draw (e.g. the menu-to-game transition) — its fence was already reset
-	 * and would never be signaled, deadlocking the wait below. Flush it now. */
-	if (vk_frame_recording)
-		vks_present_frame();
+	/* Wait for this frame slot's previous submission to retire. The fence is
+	 * reset only after a successful acquire below, so a failed acquire leaves
+	 * it signaled and this wait returns immediately next time. */
 	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
 
 	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
@@ -1267,18 +1270,12 @@ void vks_start_frame(grs_canvas &)
 	vks_begin_frame();
 }
 
-/* Ensure a frame is recording. Used by 2D draw paths that may run outside a
- * 3D frame (menus, loading screens) so their draws — and the per-frame clear
- * — still happen. */
-/* Ensure a frame is recording. Returns false if the swapchain is unavailable
- * (out of date); callers must skip drawing when it returns false. Used by 2D
- * draw paths that may run outside a 3D frame (menus, loading screens) so
- * their draws — and the per-frame clear — still happen. */
+/* Ensure a frame is recording (begins one if none is open — begin_frame is
+ * idempotent). Returns false if the swapchain is out of date, so 2D callers
+ * can skip drawing. Used by draw paths that may run outside a 3D frame. */
 bool vks_ensure_frame()
 {
-	if (!vk_frame_recording)
-		return vks_begin_frame();
-	return true;
+	return vks_begin_frame();
 }
 
 /* Close the render pass, submit the frame's command buffer, and present. This
@@ -1287,7 +1284,9 @@ bool vks_ensure_frame()
 void vks_present_frame()
 {
 	if (!vk_frame_recording)
+	{
 		return;
+	}
 
 	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
 
