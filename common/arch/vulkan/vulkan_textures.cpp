@@ -13,7 +13,10 @@
 #include "gr.h"
 #include "error.h"
 #include "u_mem.h"
+#include "rle.h"
+#include "console.h"
 
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -270,8 +273,22 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 
 	const uint32_t w = root->bm_w;
 	const uint32_t h = root->bm_h;
-	const uint8_t *src = root->get_bitmap_data();
 	const uint8_t bmflags = root->get_flags();
+
+	/* RLE-compressed bitmaps (BM_FLAG_RLE) store a packed run-length stream,
+	 * not linear paletted pixels — decode to linear first, exactly as
+	 * ogl_loadbmtexture_f does. The decode buffer must outlive the RGBA
+	 * expansion below. */
+	std::array<uint8_t, 300 * 1024> decodebuf;
+	const uint8_t *src;
+	if (root->get_flag_mask(BM_FLAG_RLE)) {
+		decodebuf = {};
+		if (!bm_rle_expand(*root).loop(w, bm_rle_expand_range{decodebuf}))
+			con_printf(CON_URGENT, "Vulkan: insufficient space to decode %ux%u bitmap", w, h);
+		src = decodebuf.data();
+	} else {
+		src = root->get_bitmap_data();
+	}
 
 	vks_texture *tex = vks_get_free_texture();
 	vks_init_texture(*tex, w, h, 0);
