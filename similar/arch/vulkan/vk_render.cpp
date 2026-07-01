@@ -31,6 +31,7 @@
 #include "args.h"
 #include "palette.h"
 #include "3d.h"
+#include "common/3d/globvars.h"
 
 #include <SDL.h>
 #include <cstring>
@@ -521,8 +522,55 @@ void g3_draw_line(const g3_draw_line_context &, g3_draw_line_point &, g3_draw_li
 {
 }
 
-void g3_draw_bitmap(grs_canvas &, const vms_vector &, fix, fix, grs_bitmap &)
+void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth, const fix iheight, grs_bitmap &bm)
 {
+	/* 2d Sprites (fireballs, powerups, explosions, blob weapons): a textured
+	 * billboard that always faces the viewer. The center is rotated into
+	 * viewer-relative space, then four corners are offset by ±width/±height in
+	 * viewer x/y — flat at the center's depth — exactly the coordinates the 3D
+	 * pipeline projects. Mirrors the OpenGL backend's g3_draw_bitmap. */
+	g3s_point pnt;
+	if ((g3_rotate_point(pnt, pos) & clipping_code::behind) != clipping_code::None)
+		return;
+
+	/* On-demand upload (mirrors ogl_bindbmtex). The live texture hangs off the
+	 * root bitmap after the upload walks the parent chain. */
+	grs_bitmap *root = &bm;
+	while (root->bm_parent)
+		root = root->bm_parent;
+	if (!root->vktexture)
+		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
+	vks_texture *tex = root->vktexture;
+	if (!tex)
+		return;
+	if (!vks_prepare_3d(canvas))
+		return;
+
+	const float cx = f2fl(pnt.p3_vec.x);
+	const float cy = f2fl(pnt.p3_vec.y);
+	const float cz = f2fl(pnt.p3_vec.z);
+	const float w = f2fl(fixmul(iwidth, Matrix_scale.x));
+	const float h = f2fl(fixmul(iheight, Matrix_scale.y));
+
+	/* UVs: the bm occupies a sub-rect of the root-sized texture image (no POT
+	 * padding in the Vulkan path), so normalize against tex->width/height. */
+	const float tw = static_cast<float>(tex->width);
+	const float th = static_cast<float>(tex->height);
+	const float u0 = static_cast<float>(bm.bm_x) / tw;
+	const float u1 = static_cast<float>(bm.bm_x + bm.bm_w) / tw;
+	const float v0 = static_cast<float>(bm.bm_y) / th;
+	const float v1 = static_cast<float>(bm.bm_y + bm.bm_h) / th;
+
+	/* White vertex color: the sprite texture carries its own color (no lighting
+	 * modulation). +y viewer = up on screen; v=0 is the top row of the bitmap,
+	 * so the sprite appears upright. Triangle fan: TL, TR, BR, BL. */
+	const vks_vertex3d verts[4] = {
+		{cx - w, cy + h, cz, u0, v0, 1.f, 1.f, 1.f},
+		{cx + w, cy + h, cz, u1, v0, 1.f, 1.f, 1.f},
+		{cx + w, cy - h, cz, u1, v1, 1.f, 1.f, 1.f},
+		{cx - w, cy - h, cz, u0, v1, 1.f, 1.f, 1.f},
+	};
+	vks_emit_3d(tex->descriptor_set, verts, 4);
 }
 
 /* 2D drawing stubs */
