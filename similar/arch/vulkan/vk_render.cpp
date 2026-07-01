@@ -163,7 +163,7 @@ void vks_urect(grs_canvas &canvas, int left, int top, int right, int bot, color_
 	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x);
 	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y);
 	const float x0 = left + ox, y0 = top + oy;
-	const float x1 = right + ox, y1 = bot + oy;
+	const float x1 = (right + 1) + ox, y1 = (bot + 1) + oy;
 	const auto &col = vks_palette_colors[c];
 	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
 	const vks_vertex v[6] = {

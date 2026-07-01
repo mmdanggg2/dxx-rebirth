@@ -113,20 +113,24 @@ void gamefont_choose_game_font(int scrx,int scry){
 		else
 		{
 
+#if DXX_USE_OGL || DXX_USE_VULKAN
 #if DXX_USE_OGL
 	if (!CGameArg.OglFixedFont)
+#endif
 	{
 		// if there's no texture filtering, scale by int
 		auto &f{*best_gamefont};
-		if (CGameCfg.TexFilt == opengl_texture_filter::classic)
-		{
-			FNTScaleX.reset(scrx / f.expected_screen_resolution_x);
-			FNTScaleY.reset(scry / f.expected_screen_resolution_y);
-		}
-		else
+#if DXX_USE_OGL
+		if (CGameCfg.TexFilt != opengl_texture_filter::classic)
 		{
 			FNTScaleX.reset(static_cast<float>(scrx) / f.expected_screen_resolution_x);
 			FNTScaleY.reset(static_cast<float>(scry) / f.expected_screen_resolution_y);
+		}
+		else
+#endif
+		{
+			FNTScaleX.reset(scrx / f.expected_screen_resolution_x);
+			FNTScaleY.reset(scry / f.expected_screen_resolution_y);
 		}
 
 		// keep proportions
