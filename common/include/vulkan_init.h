@@ -54,6 +54,7 @@ extern VkPipeline vk_2d_pipeline;
 extern VkRenderPass vk_render_pass;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
 extern VkPipelineLayout vk_2d_pipeline_layout;
+extern VkPipeline vk_3d_pipeline;
 extern VkDescriptorPool vk_descriptor_pool;
 
 /* 1x1 white texture descriptor set, bound for flat primitives (rect/line/pixel)
@@ -63,6 +64,7 @@ extern VkDescriptorSet vk_white_descriptor_set;
 /* Shader modules */
 extern VkShaderModule vk_vertex_shader;
 extern VkShaderModule vk_fragment_shader;
+extern VkShaderModule vk_3d_vertex_shader;
 
 /* Framebuffers, command buffers, and command pools */
 extern std::vector<VkFramebuffer> vk_framebuffers;
@@ -95,11 +97,13 @@ void vks_init_state();
 void vks_init_descriptor_pool();
 void vks_destroy_descriptor_pool();
 
-/* Depth resources */
-extern VkImage vk_depth_image;
-extern VkDeviceMemory vk_depth_image_memory;
-extern VkImageView vk_depth_image_view;
+/* Depth resources: one image per swapchain image, so concurrent frames
+ * rendering to different swapchain images never alias a depth attachment. */
+extern std::vector<VkImage> vk_depth_images;
+extern std::vector<VkDeviceMemory> vk_depth_image_memories;
+extern std::vector<VkImageView> vk_depth_image_views;
 void initDepthResources();
+void destroyDepthResources();
 
 /* Per-frame vertex buffers (host-visible, persistently mapped). 2D draw
  * functions append vertices into the current frame's buffer; the write cursor
@@ -110,17 +114,28 @@ struct vks_vertex
 	float u, v;       /* texture coordinates */
 	float r, g, b, a; /* modulating color */
 };
+/* 3D vertex: viewer-relative position (f2fl), texture coords, lighting color.
+ * Also 32 bytes (8 floats), so it shares the per-frame vertex buffer with the
+ * 2D vertex via vks_alloc_bytes. */
+struct vks_vertex3d
+{
+	float x, y, z; /* viewer-relative position (f2fl) */
+	float u, v;    /* texture coordinates (f2fl) */
+	float r, g, b; /* modulating light/color */
+};
 struct vks_vertex_alloc
 {
 	VkBuffer buffer;
 	VkDeviceSize offset;
-	vks_vertex *vertices; /* writable mapped pointer */
+	void *data; /* writable mapped pointer */
 };
 void vks_init_vertex_buffers();
 void vks_destroy_vertex_buffers();
-/* Reserve `count` vertices in the current frame's buffer and return a writable
- * pointer plus the bind offset. Caller fills vertices, then binds+draws. */
+/* Reserve `count` 2D vertices (32 bytes each) in the current frame's buffer. */
 vks_vertex_alloc vks_alloc_vertices(uint32_t count);
+/* Reserve `bytes` in the current frame's buffer. Used by draw paths whose
+ * vertex stride differs from vks_vertex (e.g. 3D). */
+vks_vertex_alloc vks_alloc_bytes(uint32_t bytes);
 /* The command buffer being recorded for the current in-flight frame. */
 VkCommandBuffer vks_get_command_buffer();
 

@@ -105,7 +105,40 @@ static void vks_emit(VkDescriptorSet ds, const vks_vertex *src, uint32_t count)
 {
 	VkCommandBuffer cmd = vks_get_command_buffer();
 	vks_vertex_alloc alloc = vks_alloc_vertices(count);
-	std::memcpy(alloc.vertices, src, count * sizeof(vks_vertex));
+	std::memcpy(alloc.data, src, count * sizeof(vks_vertex));
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline_layout, 0, 1, &ds, 0, nullptr);
+	VkDeviceSize offset = alloc.offset;
+	vkCmdBindVertexBuffers(cmd, 0, 1, &alloc.buffer, &offset);
+	vkCmdDraw(cmd, count, 1, 0, 0);
+}
+
+/* Bind the 3D pipeline and set the viewport/scissor to the canvas rect. The 3D
+ * vertex shader projects viewer-relative coordinates itself (90-degree
+ * perspective), so no push constant is needed. */
+static bool vks_prepare_3d(grs_canvas &canvas)
+{
+	if (!vks_ensure_frame())
+		return false;
+	VkCommandBuffer cmd = vks_get_command_buffer();
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_3d_pipeline);
+	const float x = static_cast<float>(canvas.cv_bitmap.bm_x);
+	const float y = static_cast<float>(canvas.cv_bitmap.bm_y);
+	const float w = static_cast<float>(canvas.cv_bitmap.bm_w);
+	const float h = static_cast<float>(canvas.cv_bitmap.bm_h);
+	const VkViewport viewport{x, y, w, h, 0.0f, 1.0f};
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	const VkRect2D scissor{{static_cast<int32_t>(canvas.cv_bitmap.bm_x), static_cast<int32_t>(canvas.cv_bitmap.bm_y)},
+		{static_cast<uint32_t>(canvas.cv_bitmap.bm_w), static_cast<uint32_t>(canvas.cv_bitmap.bm_h)}};
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+	return true;
+}
+
+/* Allocate 3D vertices, copy, bind descriptor set + vertex buffer, draw. */
+static void vks_emit_3d(VkDescriptorSet ds, const vks_vertex3d *src, uint32_t count)
+{
+	VkCommandBuffer cmd = vks_get_command_buffer();
+	vks_vertex_alloc alloc = vks_alloc_bytes(count * sizeof(vks_vertex3d));
+	std::memcpy(alloc.data, src, count * sizeof(vks_vertex3d));
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline_layout, 0, 1, &ds, 0, nullptr);
 	VkDeviceSize offset = alloc.offset;
 	vkCmdBindVertexBuffers(cmd, 0, 1, &alloc.buffer, &offset);
@@ -406,14 +439,74 @@ void gr_palette_load(const palette_array_t &pal)
 } /* namespace dcx */
 
 namespace dcx {
+/* Sentinels: the mine renderer passes these (as tmap_drawer_type function
+ * pointers) so _g3_draw_tmap can distinguish textured vs. cloaked faces. They
+ * are defined (as no-ops) below. */
+void draw_tmap(grs_canvas &, const grs_bitmap &, std::span<const g3_draw_tmap_point *const>);
+void draw_tmap_flat(grs_canvas &, const grs_bitmap &, std::span<const g3_draw_tmap_point *const>);
 
-/* 3D drawing stubs */
-void _g3_draw_poly(grs_canvas &, std::span<g3_draw_tmap_point *const>, uint8_t)
+/* 3D polygon drawing (mine walls, objects). Vertices are viewer-relative
+ * g3_rotated_point coords; the 3D pipeline projects them with a 90-degree
+ * perspective frustum and writes depth. */
+void _g3_draw_poly(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> pointlist, uint8_t color)
 {
+	const auto nv = pointlist.size();
+	if (nv < 3 || nv > MAX_POINTS_PER_POLY)
+		return;
+	if (!vks_prepare_3d(canvas))
+		return;
+	/* Flat-shaded: every vertex gets the palette color; UVs unused (white tex). */
+	const float cr = CPAL2Tr(color), cg = CPAL2Tg(color), cb = CPAL2Tb(color);
+	std::array<vks_vertex3d, MAX_POINTS_PER_POLY> verts;
+	for (uint32_t i = 0; i < nv; i++) {
+		const auto &pv = pointlist[i]->p3_vec;
+		verts[i] = {f2fl(pv.x), f2fl(pv.y), f2fl(pv.z), 0.f, 0.f, cr, cg, cb};
+	}
+	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
 
-void _g3_draw_tmap(grs_canvas &, std::span<g3_draw_tmap_point *const>, const g3s_uvl *, const g3s_lrgb *, grs_bitmap &, void (*)(grs_canvas &, const grs_bitmap &, std::span<g3_draw_tmap_point *const>))
+void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> pointlist, const g3s_uvl *const uvl_list, const g3s_lrgb *const light_rgb, grs_bitmap &bm, const tmap_drawer_type tmap_drawer_ptr)
 {
+	const auto nv = pointlist.size();
+	if (nv < 3 || nv > MAX_POINTS_PER_POLY)
+		return;
+
+	/* On-demand upload (mirrors ogl_bindbmtex): the live texture hangs off the
+	 * root bitmap after the upload walks the parent chain. */
+	grs_bitmap *root = &bm;
+	while (root->bm_parent)
+		root = root->bm_parent;
+	if (!root->vktexture)
+		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
+	vks_texture *tex = root->vktexture;
+	if (!tex)
+		return;
+	if (!vks_prepare_3d(canvas))
+		return;
+
+	/* draw_tmap => textured; anything else (draw_tmap_flat) => cloaked/flat. */
+	const bool textured = (tmap_drawer_ptr == draw_tmap);
+	const bool no_light = bm.get_flag_mask(BM_FLAG_NO_LIGHTING);
+	std::array<vks_vertex3d, MAX_POINTS_PER_POLY> verts;
+	for (uint32_t i = 0; i < nv; i++) {
+		const auto &pv = pointlist[i]->p3_vec;
+		auto &vt = verts[i];
+		vt.x = f2fl(pv.x);
+		vt.y = f2fl(pv.y);
+		vt.z = f2fl(pv.z);
+		vt.u = f2fl(uvl_list[i].u);
+		vt.v = f2fl(uvl_list[i].v);
+		if (!textured)
+			vt.r = vt.g = vt.b = 0.f;		/* cloaked silhouette */
+		else if (no_light)
+			vt.r = vt.g = vt.b = 1.f;		/* full-bright */
+		else {
+			vt.r = f2fl(light_rgb[i].r);
+			vt.g = f2fl(light_rgb[i].g);
+			vt.b = f2fl(light_rgb[i].b);
+		}
+	}
+	vks_emit_3d(tex->descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
 
 void g3_draw_sphere(grs_canvas &, g3_draw_sphere_point &, fix, uint8_t)

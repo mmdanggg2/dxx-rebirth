@@ -46,6 +46,7 @@ VkFormat vk_swapchain_format;
 VkFormat vk_depth_format;
 
 VkPipeline vk_2d_pipeline;
+VkPipeline vk_3d_pipeline;
 VkRenderPass vk_render_pass;
 VkDescriptorSetLayout vk_descriptor_set_layout;
 VkPipelineLayout vk_2d_pipeline_layout;
@@ -53,6 +54,7 @@ VkDescriptorPool vk_descriptor_pool;
 VkDescriptorSet vk_white_descriptor_set = VK_NULL_HANDLE;
 
 VkShaderModule vk_vertex_shader;
+VkShaderModule vk_3d_vertex_shader;
 VkShaderModule vk_fragment_shader;
 
 std::vector<VkFramebuffer> vk_framebuffers;
@@ -299,17 +301,22 @@ void vks_destroy_vertex_buffers()
 	vk_frame_vbs.clear();
 }
 
-vks_vertex_alloc vks_alloc_vertices(uint32_t count)
+vks_vertex_alloc vks_alloc_bytes(uint32_t bytes)
 {
 	auto &vb = vk_frame_vbs[vk_current_frame];
-	if (vb.offset + count * sizeof(vks_vertex) > vb.capacity)
+	if (vb.offset + bytes > vb.capacity)
 		Error("Vulkan: vertex buffer overflow");
 	vks_vertex_alloc a;
 	a.buffer = vb.buffer;
 	a.offset = vb.offset;
-	a.vertices = reinterpret_cast<vks_vertex *>(static_cast<char *>(vb.mapped) + vb.offset);
-	vb.offset += count * sizeof(vks_vertex);
+	a.data = static_cast<char *>(vb.mapped) + vb.offset;
+	vb.offset += bytes;
 	return a;
+}
+
+vks_vertex_alloc vks_alloc_vertices(uint32_t count)
+{
+	return vks_alloc_bytes(count * sizeof(vks_vertex));
 }
 
 VkCommandBuffer vks_get_command_buffer()
@@ -317,64 +324,86 @@ VkCommandBuffer vks_get_command_buffer()
 	return vk_command_buffers[vk_current_frame];
 }
 
-VkImage vk_depth_image = VK_NULL_HANDLE;
-VkDeviceMemory vk_depth_image_memory = VK_NULL_HANDLE;
-VkImageView vk_depth_image_view = VK_NULL_HANDLE;
+/* One depth image per swapchain image, so concurrent frames (rendering to
+ * different swapchain images) never alias a single depth attachment. */
+std::vector<VkImage> vk_depth_images;
+std::vector<VkDeviceMemory> vk_depth_image_memories;
+std::vector<VkImageView> vk_depth_image_views;
 
 void initDepthResources()
 {
-	VkImageCreateInfo imageInfo{};
-	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.extent.width = vk_surface_extent.width;
-	imageInfo.extent.height = vk_surface_extent.height;
-	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = 1;
-	imageInfo.arrayLayers = 1;
-	imageInfo.format = vk_depth_format;
-	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-	VkResult result = vkCreateImage(vk_device, &imageInfo, nullptr, &vk_depth_image);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create depth image");;
-
-	VkMemoryRequirements memReqs;
-	vkGetImageMemoryRequirements(vk_device, vk_depth_image, &memReqs);
-
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memReqs.size;
+	destroyDepthResources();
+	const auto count = vk_swapchain_images.size();
+	vk_depth_images.assign(count, VK_NULL_HANDLE);
+	vk_depth_image_memories.assign(count, VK_NULL_HANDLE);
+	vk_depth_image_views.assign(count, VK_NULL_HANDLE);
 
 	VkPhysicalDeviceMemoryProperties memProperties;
 	vkGetPhysicalDeviceMemoryProperties(vk_physical_device, &memProperties);
-	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-		if ((memReqs.memoryTypeBits & (1 << i)) &&
-			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-			allocInfo.memoryTypeIndex = i;
-			break;
+
+	for (uint32_t i = 0; i < count; i++) {
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = vk_surface_extent.width;
+		imageInfo.extent.height = vk_surface_extent.height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = vk_depth_format;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+		if (vkCreateImage(vk_device, &imageInfo, nullptr, &vk_depth_images[i]) != VK_SUCCESS)
+			Error("Vulkan: Failed to create depth image");
+
+		VkMemoryRequirements memReqs;
+		vkGetImageMemoryRequirements(vk_device, vk_depth_images[i], &memReqs);
+
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memReqs.size;
+		for (uint32_t m = 0; m < memProperties.memoryTypeCount; m++) {
+			if ((memReqs.memoryTypeBits & (1u << m)) &&
+				(memProperties.memoryTypes[m].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+				allocInfo.memoryTypeIndex = m;
+				break;
+			}
 		}
+
+		if (vkAllocateMemory(vk_device, &allocInfo, nullptr, &vk_depth_image_memories[i]) != VK_SUCCESS)
+			Error("Vulkan: Failed to allocate depth image memory");
+		if (vkBindImageMemory(vk_device, vk_depth_images[i], vk_depth_image_memories[i], 0) != VK_SUCCESS)
+			Error("Vulkan: Failed to bind depth image memory");
+
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = vk_depth_images[i];
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = vk_depth_format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		if (vkCreateImageView(vk_device, &viewInfo, nullptr, &vk_depth_image_views[i]) != VK_SUCCESS)
+			Error("Vulkan: Failed to create depth image view");
 	}
+}
 
-	result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &vk_depth_image_memory);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate depth image memory");;
-
-	result = vkBindImageMemory(vk_device, vk_depth_image, vk_depth_image_memory, 0);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to bind depth image memory");;
-
-	VkImageViewCreateInfo viewInfo{};
-	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	viewInfo.image = vk_depth_image;
-	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	viewInfo.format = vk_depth_format;
-	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	viewInfo.subresourceRange.levelCount = 1;
-	viewInfo.subresourceRange.layerCount = 1;
-
-	result = vkCreateImageView(vk_device, &viewInfo, nullptr, &vk_depth_image_view);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create depth image view");;
+void destroyDepthResources()
+{
+	for (auto &v : vk_depth_image_views)
+		if (v) vkDestroyImageView(vk_device, v, nullptr);
+	for (auto &m : vk_depth_image_memories)
+		if (m) vkFreeMemory(vk_device, m, nullptr);
+	for (auto &img : vk_depth_images)
+		if (img) vkDestroyImage(vk_device, img, nullptr);
+	vk_depth_image_views.clear();
+	vk_depth_image_memories.clear();
+	vk_depth_images.clear();
 }
 
 void vks_init_instance(SDL_Window *sdl_window)
@@ -648,10 +677,10 @@ void vks_init_render_pass()
 	VkSubpassDependency dependency{};
 	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
 	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 	dependency.srcAccessMask = 0;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
 	std::array<VkAttachmentDescription, 2> attachments = {{colorAttachment, depthAttachment}};
 
@@ -670,64 +699,54 @@ void vks_init_render_pass()
 
 void vks_init_pipeline()
 {
-	/* Vertex input: pos(2) + uv(2) + color(4) = 32 bytes. */
-	VkVertexInputBindingDescription bindingDesc{};
-	bindingDesc.binding = 0;
-	bindingDesc.stride = sizeof(vks_vertex);
-	bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+	/* --- pipeline layout (shared by 2D and 3D) --- */
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pushRange.offset = 0;
+	pushRange.size = sizeof(float) * 4;
 
-	VkVertexInputAttributeDescription attrDescs[3]{};
-	attrDescs[0].location = 0;
-	attrDescs[0].binding = 0;
-	attrDescs[0].format = VK_FORMAT_R32G32_SFLOAT;
-	attrDescs[0].offset = 0; /* pos */
-	attrDescs[1].location = 1;
-	attrDescs[1].binding = 0;
-	attrDescs[1].format = VK_FORMAT_R32G32_SFLOAT;
-	attrDescs[1].offset = offsetof(vks_vertex, u);
-	attrDescs[2].location = 2;
-	attrDescs[2].binding = 0;
-	attrDescs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-	attrDescs[2].offset = offsetof(vks_vertex, r);
+	VkPipelineLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.setLayoutCount = 1;
+	layoutInfo.pSetLayouts = &vk_descriptor_set_layout;
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &pushRange;
+	if (vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_2d_pipeline_layout) != VK_SUCCESS)
+		Error("Vulkan: Failed to create pipeline layout");
 
-	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInputInfo.vertexBindingDescriptionCount = 1;
-	vertexInputInfo.pVertexBindingDescriptions = &bindingDesc;
-	vertexInputInfo.vertexAttributeDescriptionCount = 3;
-	vertexInputInfo.pVertexAttributeDescriptions = attrDescs;
+	/* --- shader modules (generated from GLSL at build time) --- */
+	VkShaderModuleCreateInfo vinfo{};
+	vinfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	vinfo.codeSize = vulkan::vertex_spv_size();
+	vinfo.pCode = vulkan::vertex_spv_code();
+	if (vkCreateShaderModule(vk_device, &vinfo, nullptr, &vk_vertex_shader) != VK_SUCCESS)
+		Error("Vulkan: Failed to create vertex shader module");
 
-	/* Input assembly: triangle lists (quads/lines/pixels all emit triangles). */
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
+	VkShaderModuleCreateInfo v3info{};
+	v3info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	v3info.codeSize = vulkan::vertex3d_spv_size();
+	v3info.pCode = vulkan::vertex3d_spv_code();
+	if (vkCreateShaderModule(vk_device, &v3info, nullptr, &vk_3d_vertex_shader) != VK_SUCCESS)
+		Error("Vulkan: Failed to create 3D vertex shader module");
 
-	/* Viewport and scissor are set dynamically per draw (full screen). */
+	VkShaderModuleCreateInfo finfo{};
+	finfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	finfo.codeSize = vulkan::fragment_spv_size();
+	finfo.pCode = vulkan::fragment_spv_code();
+	if (vkCreateShaderModule(vk_device, &finfo, nullptr, &vk_fragment_shader) != VK_SUCCESS)
+		Error("Vulkan: Failed to create fragment shader module");
+
+	/* --- state shared by both pipelines --- */
 	VkPipelineViewportStateCreateInfo viewportState{};
 	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 	viewportState.viewportCount = 1;
 	viewportState.scissorCount = 1;
 
-	/* Rasterizer: no culling (2D), 1px lines. */
-	VkPipelineRasterizationStateCreateInfo rasterizer{};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.depthClampEnable = VK_FALSE;
-	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_NONE;
-	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rasterizer.depthBiasEnable = VK_FALSE;
-
-	/* Multisample */
 	VkPipelineMultisampleStateCreateInfo multisampling{};
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.sampleShadingEnable = VK_FALSE;
 	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-	/* Color blend: standard alpha. Opaque primitives draw alpha 1 (no change);
-	 * color-key transparency relies on the shader discarding alpha-0 texels. */
 	VkPipelineColorBlendAttachmentState blendAttachment{};
 	blendAttachment.blendEnable = VK_TRUE;
 	blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -745,16 +764,6 @@ void vks_init_pipeline()
 	colorBlending.attachmentCount = 1;
 	colorBlending.pAttachments = &blendAttachment;
 
-	/* Depth disabled for 2D (the attachment still exists for future 3D use). */
-	VkPipelineDepthStencilStateCreateInfo depthStencil{};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_FALSE;
-	depthStencil.depthWriteEnable = VK_FALSE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
-	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.stencilTestEnable = VK_FALSE;
-
-	/* Dynamic state: viewport + scissor set per frame. */
 	constexpr std::array dynamicStates{
 		VK_DYNAMIC_STATE_VIEWPORT,
 		VK_DYNAMIC_STATE_SCISSOR,
@@ -764,68 +773,144 @@ void vks_init_pipeline()
 	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
 	dynamicState.pDynamicStates = dynamicStates.data();
 
-	/* Pipeline layout: texture descriptor set + 16-byte vertex push constant
-	 * (pixel->NDC scale/offset). */
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(float) * 4;
+	VkPipelineShaderStageCreateInfo fragStage{};
+	fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	fragStage.module = vk_fragment_shader;
+	fragStage.pName = "main";
 
-	VkPipelineLayoutCreateInfo layoutInfo{};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = 1;
-	layoutInfo.pSetLayouts = &vk_descriptor_set_layout;
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushRange;
+	auto make_rasterizer = []() {
+		VkPipelineRasterizationStateCreateInfo r{};
+		r.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+		r.depthClampEnable = VK_FALSE;
+		r.rasterizerDiscardEnable = VK_FALSE;
+		r.polygonMode = VK_POLYGON_MODE_FILL;
+		r.lineWidth = 1.0f;
+		r.cullMode = VK_CULL_MODE_NONE;
+		r.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+		r.depthBiasEnable = VK_FALSE;
+		return r;
+	};
 
-	VkResult result = vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_2d_pipeline_layout);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create pipeline layout");
+	/* --- 2D pipeline: pos(2)+uv(2)+color(4), triangle list, depth off --- */
+	{
+		VkVertexInputBindingDescription bindingDesc{};
+		bindingDesc.binding = 0;
+		bindingDesc.stride = sizeof(vks_vertex);
+		bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-	/* Vertex shader SPIR-V (generated at build time from GLSL) */
-	VkShaderModuleCreateInfo vertexInfo{};
-	vertexInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	vertexInfo.codeSize = vulkan::vertex_spv_size();
-	vertexInfo.pCode = vulkan::vertex_spv_code();
-	if (vkCreateShaderModule(vk_device, &vertexInfo, nullptr, &vk_vertex_shader) != VK_SUCCESS)
-		Error("Vulkan: Failed to create vertex shader module");
+		VkVertexInputAttributeDescription attrs[3]{};
+		attrs[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+		attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(vks_vertex, u)};
+		attrs[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(vks_vertex, r)};
 
-	/* Fragment shader SPIR-V (generated at build time from GLSL) */
-	VkShaderModuleCreateInfo fragmentInfo{};
-	fragmentInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	fragmentInfo.codeSize = vulkan::fragment_spv_size();
-	fragmentInfo.pCode = vulkan::fragment_spv_code();
-	if (vkCreateShaderModule(vk_device, &fragmentInfo, nullptr, &vk_fragment_shader) != VK_SUCCESS)
-		Error("Vulkan: Failed to create fragment shader module");
+		VkPipelineVertexInputStateCreateInfo vertexInput{};
+		vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+		vertexInput.vertexBindingDescriptionCount = 1;
+		vertexInput.pVertexBindingDescriptions = &bindingDesc;
+		vertexInput.vertexAttributeDescriptionCount = 3;
+		vertexInput.pVertexAttributeDescriptions = attrs;
 
-	std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
-	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-	stages[0].module = vk_vertex_shader;
-	stages[0].pName = "main";
-	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	stages[1].module = vk_fragment_shader;
-	stages[1].pName = "main";
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+		inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-	VkGraphicsPipelineCreateInfo pipelineInfo{};
-	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
-	pipelineInfo.pStages = stages.data();
-	pipelineInfo.pVertexInputState = &vertexInputInfo;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
-	pipelineInfo.pViewportState = &viewportState;
-	pipelineInfo.pRasterizationState = &rasterizer;
-	pipelineInfo.pMultisampleState = &multisampling;
-	pipelineInfo.pColorBlendState = &colorBlending;
-	pipelineInfo.pDepthStencilState = &depthStencil;
-	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.layout = vk_2d_pipeline_layout;
-	pipelineInfo.renderPass = vk_render_pass;
-	pipelineInfo.subpass = 0;
-	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+		VkPipelineRasterizationStateCreateInfo rasterizer = make_rasterizer();
 
-	result = vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk_2d_pipeline);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create graphics pipeline");
+		VkPipelineDepthStencilStateCreateInfo depthStencil{};
+		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+		depthStencil.depthTestEnable = VK_FALSE;
+		depthStencil.depthWriteEnable = VK_FALSE;
+		depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+		depthStencil.depthBoundsTestEnable = VK_FALSE;
+		depthStencil.stencilTestEnable = VK_FALSE;
+
+		VkPipelineShaderStageCreateInfo stages[2]{};
+		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+		stages[0].module = vk_vertex_shader;
+		stages[0].pName = "main";
+		stages[1] = fragStage;
+
+		VkGraphicsPipelineCreateInfo info{};
+		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		info.stageCount = 2;
+		info.pStages = stages;
+		info.pVertexInputState = &vertexInput;
+		info.pInputAssemblyState = &inputAssembly;
+		info.pViewportState = &viewportState;
+		info.pRasterizationState = &rasterizer;
+		info.pMultisampleState = &multisampling;
+		info.pColorBlendState = &colorBlending;
+		info.pDepthStencilState = &depthStencil;
+		info.pDynamicState = &dynamicState;
+		info.layout = vk_2d_pipeline_layout;
+		info.renderPass = vk_render_pass;
+		info.subpass = 0;
+
+		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_2d_pipeline) != VK_SUCCESS)
+			Error("Vulkan: Failed to create 2D graphics pipeline");
+	}
+
+	/* --- 3D pipeline: pos(3)+uv(2)+color(3), triangle fan, depth test+write --- */
+	{
+		VkVertexInputBindingDescription bindingDesc{};
+		bindingDesc.binding = 0;
+		bindingDesc.stride = sizeof(vks_vertex3d);
+		bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+		VkVertexInputAttributeDescription attrs[3]{};
+		attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
+		attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(vks_vertex3d, u)};
+		attrs[2] = {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vks_vertex3d, r)};
+
+		VkPipelineVertexInputStateCreateInfo vertexInput{};
+		vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+		vertexInput.vertexBindingDescriptionCount = 1;
+		vertexInput.pVertexBindingDescriptions = &bindingDesc;
+		vertexInput.vertexAttributeDescriptionCount = 3;
+		vertexInput.pVertexAttributeDescriptions = attrs;
+
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+		inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+
+		VkPipelineRasterizationStateCreateInfo rasterizer = make_rasterizer();
+
+		VkPipelineDepthStencilStateCreateInfo depthStencil{};
+		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+		depthStencil.depthTestEnable = VK_TRUE;
+		depthStencil.depthWriteEnable = VK_TRUE;
+		depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+		depthStencil.depthBoundsTestEnable = VK_FALSE;
+		depthStencil.stencilTestEnable = VK_FALSE;
+
+		VkPipelineShaderStageCreateInfo stages[2]{};
+		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+		stages[0].module = vk_3d_vertex_shader;
+		stages[0].pName = "main";
+		stages[1] = fragStage;
+
+		VkGraphicsPipelineCreateInfo info{};
+		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		info.stageCount = 2;
+		info.pStages = stages;
+		info.pVertexInputState = &vertexInput;
+		info.pInputAssemblyState = &inputAssembly;
+		info.pViewportState = &viewportState;
+		info.pRasterizationState = &rasterizer;
+		info.pMultisampleState = &multisampling;
+		info.pColorBlendState = &colorBlending;
+		info.pDepthStencilState = &depthStencil;
+		info.pDynamicState = &dynamicState;
+		info.layout = vk_2d_pipeline_layout;
+		info.renderPass = vk_render_pass;
+		info.subpass = 0;
+
+		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_3d_pipeline) != VK_SUCCESS)
+			Error("Vulkan: Failed to create 3D graphics pipeline");
+	}
 }
 
 void vks_init_framebuffers(uint32_t width, uint32_t height)
@@ -836,7 +921,7 @@ void vks_init_framebuffers(uint32_t width, uint32_t height)
 	vk_framebuffers.resize(imageCount);
 
 	for (uint32_t i = 0; i < imageCount; i++) {
-		VkImageView attachments[2] = {vk_swapchain_image_views[i], vk_depth_image_view};
+		VkImageView attachments[2] = {vk_swapchain_image_views[i], vk_depth_image_views[i]};
 
 		VkFramebufferCreateInfo fbInfo{};
 		fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -986,12 +1071,7 @@ void vks_shutdown()
 	for (auto &fb : vk_framebuffers)
 		vkDestroyFramebuffer(vk_device, fb, nullptr);
 
-	if (vk_depth_image_view)
-		vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
-	if (vk_depth_image_memory)
-		vkFreeMemory(vk_device, vk_depth_image_memory, nullptr);
-	if (vk_depth_image)
-		vkDestroyImage(vk_device, vk_depth_image, nullptr);
+	destroyDepthResources();
 
 	vks_destroy_white_texture();
 	vks_destroy_vertex_buffers();
@@ -1000,8 +1080,12 @@ void vks_shutdown()
 		vkDestroyShaderModule(vk_device, vk_fragment_shader, nullptr);
 	if (vk_vertex_shader)
 		vkDestroyShaderModule(vk_device, vk_vertex_shader, nullptr);
+	if (vk_3d_vertex_shader)
+		vkDestroyShaderModule(vk_device, vk_3d_vertex_shader, nullptr);
 	if (vk_2d_pipeline)
 		vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
+	if (vk_3d_pipeline)
+		vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
 	if (vk_2d_pipeline_layout)
 		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
 	if (vk_render_pass)
@@ -1061,28 +1145,25 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 			vkDestroyFramebuffer(vk_device, fb, nullptr);
 		if (vk_2d_pipeline)
 			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
+		if (vk_3d_pipeline)
+			vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 		vk_swapchain = VK_NULL_HANDLE;
 		for (auto &view : vk_swapchain_image_views)
 			vkDestroyImageView(vk_device, view, nullptr);
 		vk_swapchain_image_views.clear();
-		if (vk_depth_image_view)
-			vkDestroyImageView(vk_device, vk_depth_image_view, nullptr);
-		if (vk_depth_image_memory)
-			vkFreeMemory(vk_device, vk_depth_image_memory, nullptr);
-		if (vk_depth_image)
-			vkDestroyImage(vk_device, vk_depth_image, nullptr);
+		destroyDepthResources();
 		if (vk_render_pass)
 			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
 	}
 
 	vk_surface_extent = {w, h};
 	vks_init_swapchain(w, h);
+	vks_init_swapchain_image_views();
 	vks_init_render_pass();
 	initDepthResources();
 	vks_init_command_buffers();
 	vks_init_pipeline();
-	vks_init_swapchain_image_views();
 	vks_init_framebuffers(w, h);
 	vks_init_sync_objects();
 	vks_destroy_vertex_buffers();
@@ -1115,6 +1196,12 @@ static bool vks_begin_frame()
 	 * is reset only after a successful acquire below, so a failed acquire
 	 * leaves it signaled and this wait returns immediately next time
 	 * (no deadlock). */
+	/* If the previous frame was begun but never presented — which happens when
+	 * the event loop bails before gr_flip() because the front window changed
+	 * mid-draw (e.g. the menu-to-game transition) — its fence was already reset
+	 * and would never be signaled, deadlocking the wait below. Flush it now. */
+	if (vk_frame_recording)
+		vks_present_frame();
 	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
 
 	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
