@@ -7,6 +7,8 @@
 // Holds the main init and de-init functions for arch-related program parts
 
 #include <SDL.h>
+#include <csignal>
+#include <cstdlib>
 #include "songs.h"
 #include "key.h"
 #include "digi.h"
@@ -23,6 +25,32 @@
 #include <SDL_image.h>
 #endif
 
+#ifndef _WIN32
+namespace {
+/* Counts quit-signal deliveries (SIGINT and SIGTERM share one counter).
+ *
+ * SDL's built-in handler turns the first of these into an SDL_QUIT event,
+ * which brings up the abort-game dialog. That only works while the main
+ * loop is pumping events: if the game is wedged the event is never
+ * dispatched and the process hangs with a quit request sitting unread.
+ * This replaces SDL's handler with our own. The first signal still
+ * enqueues SDL_QUIT, but a second signal terminates immediately from
+ * signal context -- so a stuck game can always be forced out (e.g.
+ * pressing Ctrl-C twice in the terminal). */
+volatile sig_atomic_t quit_signal_count;
+
+static void quit_signal_handler(int)
+{
+	const auto n = quit_signal_count + 1;
+	quit_signal_count = n;
+	if (n >= 2)
+		std::_Exit(1);
+	SDL_Event event{};
+	event.type = SDL_QUIT;
+	SDL_PushEvent(&event);
+}
+}
+#endif
 namespace dsx {
 
 static void arch_close(void)
@@ -65,6 +93,18 @@ arch_atexit arch_init()
 
 	if (SDL_Init(SDL_INIT_VIDEO) < 0)
 		Error("SDL library initialisation failed: %s.",SDL_GetError());
+#ifndef _WIN32
+	/* SDL installs its own SIGINT/SIGTERM handlers during SDL_Init. Replace
+	 * both so that a second quit signal force-exits even when the main loop
+	 * is stuck. sigaction (rather than signal) keeps the handler installed
+	 * across deliveries regardless of SysV/BSD signal() semantics. */
+	struct sigaction sa{};
+	sa.sa_handler = quit_signal_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	sigaction(SIGINT, &sa, nullptr);
+	sigaction(SIGTERM, &sa, nullptr);
+#endif
 #if DXX_USE_SDLIMAGE
 	IMG_Init(0);
 #endif
