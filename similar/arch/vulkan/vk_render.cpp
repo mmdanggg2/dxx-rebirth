@@ -199,7 +199,17 @@ void vks_urect(grs_canvas &canvas, int left, int top, int right, int bot, color_
 	const float x0 = left + ox, y0 = top + oy;
 	const float x1 = (right + 1) + ox, y1 = (bot + 1) + oy;
 	const auto &col = vks_palette_colors[c];
-	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
+	const float cr = col[0], cg = col[1], cb = col[2];
+	/* Cloak/transparency fade: when cv_fade_level is active (0..LEVELS-1) the
+	 * software renderer darkens existing framebuffer pixels via gr_fade_table
+	 * rather than filling the source color. Approximate that here as a
+	 * semi-transparent overlay: alpha is the darkening fraction, so the
+	 * standard src*alpha+dst*(1-alpha) blend blackens the pixels beneath. At
+	 * GR_FADE_OFF the rect is opaque, matching a normal solid fill. */
+	const auto fl = static_cast<unsigned>(canvas.cv_fade_level);
+	const float ca = (fl < GR_FADE_LEVELS)
+		? (1.0f - static_cast<float>(fl) / static_cast<float>(GR_FADE_LEVELS - 1))
+		: col[3];
 	const vks_vertex v[6] = {
 		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
 		{x1, y0, 0.f, 0.f, cr, cg, cb, ca},
