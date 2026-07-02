@@ -366,30 +366,41 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 
 void vks_freebmtexture(grs_bitmap &bm)
 {
-	if (bm.get_type() != bm_mode::vulkan)
-		return;
+	/* Game textures are bm_mode::linear (vks_loadbmtexture_f intentionally
+	 * keeps them linear), so check the vktexture pointer, not the bitmap type.
+	 * Mirrors ogl_freebmtexture which checks bm.gltexture. */
 	vks_texture *tex = bm.vktexture;
-	if (tex) {
-		if (tex->descriptor_set)
-			vkFreeDescriptorSets(vk_device, vk_descriptor_pool, 1, &tex->descriptor_set);
-		if (tex->sampler)
-			vkDestroySampler(vk_device, tex->sampler, nullptr);
-		if (tex->view)
-			vkDestroyImageView(vk_device, tex->view, nullptr);
-		if (tex->memory)
-			vkFreeMemory(vk_device, tex->memory, nullptr);
-		if (tex->image)
-			vkDestroyImage(vk_device, tex->image, nullptr);
-		if (tex->staging_buffer)
-			vkDestroyBuffer(vk_device, tex->staging_buffer, nullptr);
-		if (tex->staging_memory)
-			vkFreeMemory(vk_device, tex->staging_memory, nullptr);
+	if (!tex)
+		return;
+	/* Descriptor sets may still be bound in in-flight command buffers.
+	 * We must wait for idle before freeing them, otherwise the descriptor
+	 * pool's internal accounting can become corrupted. */
+	vkDeviceWaitIdle(vk_device);
+	if (tex->descriptor_set)
+		vkFreeDescriptorSets(vk_device, vk_descriptor_pool, 1, &tex->descriptor_set);
+	if (tex->sampler)
+		vkDestroySampler(vk_device, tex->sampler, nullptr);
+	if (tex->view)
+		vkDestroyImageView(vk_device, tex->view, nullptr);
+	if (tex->memory)
+		vkFreeMemory(vk_device, tex->memory, nullptr);
+	if (tex->image)
+		vkDestroyImage(vk_device, tex->image, nullptr);
+	if (tex->staging_buffer)
+		vkDestroyBuffer(vk_device, tex->staging_buffer, nullptr);
+	if (tex->staging_memory)
+		vkFreeMemory(vk_device, tex->staging_memory, nullptr);
+	tex->descriptor_set = VK_NULL_HANDLE;
+	tex->sampler = VK_NULL_HANDLE;
+	tex->view = VK_NULL_HANDLE;
+	tex->memory = VK_NULL_HANDLE;
+	tex->image = VK_NULL_HANDLE;
+	tex->staging_buffer = VK_NULL_HANDLE;
+	tex->staging_memory = VK_NULL_HANDLE;
 
-		/* Return slot to free list */
-		free_textures.push_back(static_cast<size_t>(tex - texture_pool.data()));
-		bm.vktexture = nullptr;
-	}
-	bm.set_type(bm_mode::linear);
+	/* Return slot to free list */
+	free_textures.push_back(static_cast<size_t>(tex - texture_pool.data()));
+	bm.vktexture = nullptr;
 }
 
 void vks_shutdown_textures()
