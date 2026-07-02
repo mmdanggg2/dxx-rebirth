@@ -576,7 +576,10 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 /* 2D drawing stubs */
 void gr_ubitmapm(grs_canvas &canvas, unsigned x, unsigned y, grs_bitmap &bm)
 {
-	(void)canvas; (void)x; (void)y; (void)bm;
+	/* Masked bitmap blit at native size (gauge icons, weapon indicators).
+	 * Delegates to the textured-quad blit; color-key transparency (alpha-0
+	 * discard in the fragment shader) handles the masked pixels. */
+	vks_ubitmapm_cs(canvas, static_cast<int>(x), static_cast<int>(y), 0, 0, bm, vks_colors::white);
 }
 
 void gr_bitmapm(grs_canvas &canvas, unsigned x, unsigned y, const grs_bitmap &bm)

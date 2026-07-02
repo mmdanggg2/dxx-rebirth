@@ -257,7 +257,7 @@ void init_cockpit()
 	if ( Screen_mode == SCREEN_EDITOR )
 		PlayerCfg.CockpitMode[1] = cockpit_mode_t::full_screen;
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	if (PlayerCfg.CockpitMode[1] != cockpit_mode_t::letterbox)
 	{
 #if DXX_BUILD_DESCENT == 2

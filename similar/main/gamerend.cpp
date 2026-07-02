@@ -63,6 +63,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -954,6 +956,8 @@ static void update_cockpits(grs_canvas &canvas)
 				grs_bitmap *const bm = &GameBitmaps[bi];
 #if DXX_USE_OGL
 			ogl_ubitmapm_cs(canvas, 0, 0, opengl_bitmap_use_dst_canvas, opengl_bitmap_use_dst_canvas, *bm, 255);
+#elif DXX_USE_VULKAN
+			vks_ubitmapm_cs(canvas, 0, 0, vulkan_bitmap_use_dst_canvas, vulkan_bitmap_use_dst_canvas, *bm, vks_colors::white);
 #else
 			gr_ubitmapm(canvas, 0, 0, *bm);
 #endif
@@ -970,6 +974,8 @@ static void update_cockpits(grs_canvas &canvas)
 				grs_bitmap *const bm = &GameBitmaps[bi];
 #if DXX_USE_OGL
 			ogl_ubitmapm_cs(canvas, 0, (HIRESMODE ? (SHEIGHT * 2) / 2.6 : (SHEIGHT * 2) / 2.72), opengl_bitmap_use_dst_canvas, (static_cast<int>(static_cast<double>(bm->bm_h) * (HIRESMODE ? static_cast<double>(SHEIGHT) / 480 : static_cast<double>(SHEIGHT) / 200) + 0.5)), *bm, 255);
+#elif DXX_USE_VULKAN
+			vks_ubitmapm_cs(canvas, 0, (HIRESMODE ? (SHEIGHT * 2) / 2.6 : (SHEIGHT * 2) / 2.72), vulkan_bitmap_use_dst_canvas, (static_cast<int>(static_cast<double>(bm->bm_h) * (HIRESMODE ? static_cast<double>(SHEIGHT) / 480 : static_cast<double>(SHEIGHT) / 200) + 0.5)), *bm, vks_colors::white);
 #else
 			gr_ubitmapm(canvas, 0, SHEIGHT - bm->bm_h, *bm);
 #endif

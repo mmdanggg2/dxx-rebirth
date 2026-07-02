@@ -59,6 +59,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "rle.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "args.h"
 #include "vclip.h"
@@ -426,8 +428,7 @@ class hud_scale_float;
 using hud_ar_scale_float = hud_scale_float<'a'>;
 using hud_x_scale_float = hud_scale_float<'x'>;
 using hud_y_scale_float = hud_scale_float<'y'>;
-
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 class base_hud_scaled_int
 {
 	const long v;
@@ -632,7 +633,7 @@ struct hud_draw_context_xyscale
 	const hud_x_scale_float xscale;
 	[[no_unique_address]]
 	const hud_y_scale_float yscale;
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	constexpr hud_draw_context_xyscale(const hud_x_scale_float x, const hud_y_scale_float y) :
 		xscale{x}, yscale{y}
 	{
@@ -647,7 +648,7 @@ struct hud_draw_context_xyscale
 
 struct hud_draw_context_hs_mr : hud_draw_context_mr, hud_draw_context_xyscale
 {
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	constexpr hud_draw_context_hs_mr(grs_canvas &c, const unsigned screen_width, const unsigned screen_height, const local_multires_gauge_graphic multires_gauge_graphic) :
 		hud_draw_context_mr{c, multires_gauge_graphic},
 		hud_draw_context_xyscale{HUD_SCALE_X(screen_width, multires_gauge_graphic), HUD_SCALE_Y(screen_height, multires_gauge_graphic)}
@@ -898,6 +899,8 @@ static inline void hud_bitblt_free(grs_canvas &canvas, const unsigned x, const u
 {
 #if DXX_USE_OGL
 	ogl_ubitmapm_cs(canvas, x, y, w, h, bm, ogl_colors::white);
+#elif DXX_USE_VULKAN
+	vks_ubitmapm_cs(canvas, static_cast<int>(x), static_cast<int>(y), static_cast<int>(w), static_cast<int>(h), bm, vks_colors::white);
 #else
 	gr_ubitmapm(canvas, x, y, bm);
 #endif
@@ -2651,7 +2654,7 @@ namespace {
 static void draw_numerical_display(const draw_numerical_display_draw_context hudctx, const int shield, const int energy)
 {
 	auto &canvas = hudctx.canvas;
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	auto &multires_gauge_graphic = hudctx.multires_gauge_graphic;
 	hud_gauge_bitblt(hudctx, NUMERICAL_GAUGE_X, NUMERICAL_GAUGE_Y, GAUGE_NUMERICAL);
 #endif
