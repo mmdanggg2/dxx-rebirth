@@ -810,7 +810,7 @@ void render_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUn
 		return;
 	}
 
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	const auto mld_save = std::exchange(Max_linear_depth, Max_linear_depth_objects);
 #endif
 
@@ -955,7 +955,7 @@ void render_object(grs_canvas &canvas, const d_level_unique_light_state &LevelUn
 
 	if (obj->render_type != render_type::RT_NONE && Newdemo_state == ND_STATE_RECORDING)
 		newdemo_record_render_object(obj);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	Max_linear_depth = mld_save;
 #endif
 }

@@ -80,7 +80,7 @@ using std::min;
 using std::max;
 
 // (former) "detail level" values
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 int Render_depth = MAX_RENDER_SEGS; //how many segments deep to render
 #else
 int Render_depth{20}; //how many segments deep to render
@@ -770,7 +770,7 @@ static void project_list(const std::array<vertnum_t, 8> &pointnumlist)
 
 
 // -----------------------------------------------------------------------------------
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 namespace dsx {
 namespace {
 static void render_segment(fvcvertptr &vcvertptr, fvcwallptr &vcwallptr, const vms_vector &Viewer_eye, grs_canvas &canvas, const vcsegptridx_t seg)
@@ -1541,7 +1541,7 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &Vertices = LevelSharedVertexState.get_vertices();
 	auto &vmobjptridx = Objects.vmptridx;
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	auto &TmapInfo = LevelUniqueTmapInfoState.TmapInfo;
 #else
 	auto &vcvertptr = Vertices.vcptr;
@@ -1613,7 +1613,7 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 			}
 		}
 	}
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	range_for (const auto segnum, reversed_render_range)
 	{
 		// Interpolation_method = 0;
@@ -1709,9 +1709,13 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 									// Do NOT render geometry with blending textures. Since we've not rendered any objects, yet, they would disappear behind them.
 									continue;
 							}
+							#if DXX_USE_OGL
 							glAlphaFunc(GL_GEQUAL,0.8); // prevent ugly outlines if an object (which is rendered later) is shown behind a grate, door, etc. if texture filtering is enabled. These sides are rendered later again with normal AlphaFunc
+							#endif
 							render_side(vcvertptr, canvas, seg, sn, wid, Viewer_eye);
+							#if DXX_USE_OGL
 							glAlphaFunc(GL_GEQUAL,0.02);
+							#endif
 						}
 						else
 							render_side(vcvertptr, canvas, seg, sn, wid, Viewer_eye);
