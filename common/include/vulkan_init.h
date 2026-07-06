@@ -113,6 +113,10 @@ extern std::vector<VkImageView> vk_depth_image_views;
 void initDepthResources();
 void destroyDepthResources();
 
+/* Multisample colour resolve resources (allocated only when vk_msaa_samples > 1). */
+void initColorResources();
+void destroyColorResources();
+
 /* Per-frame vertex buffers (host-visible, persistently mapped). 2D draw
  * functions append vertices into the current frame's buffer; the write cursor
  * resets at the start of each frame once that frame's fence has retired. */
