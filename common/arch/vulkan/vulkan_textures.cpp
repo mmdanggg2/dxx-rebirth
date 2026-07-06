@@ -329,10 +329,14 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 	vks_texture *tex = vks_get_free_texture();
 	vks_init_texture(*tex, w, h, 0);
 
-	/* Expand paletted (1 byte/pixel) source into RGBA via the current palette.
-	 * Mirrors ogl_filltexbuf: index 255 with BM_FLAG_TRANSPARENT and index 254
-	 * with BM_FLAG_SUPER_TRANSPARENT become fully transparent; everything else
-	 * maps through gr_current_pal (entries are 0..63, scaled by 4). */
+	/* Expand paletted (1 byte/pixel) source into RGBA via gr_palette -- the
+	 * selected game/art palette (set by gr_use_palette_table / the PCX loader),
+	 * NOT the bound gr_current_pal, which lags until gr_palette_load. This
+	 * mirrors ogl_loadtexture(gr_palette, ...) so fullscreen bitmaps uploaded
+	 * before their gr_palette_load (briefing/title screens) get the right
+	 * colours. Mirrors ogl_filltexbuf: index 255 with BM_FLAG_TRANSPARENT and
+	 * index 254 with BM_FLAG_SUPER_TRANSPARENT become fully transparent;
+	 * everything else maps through gr_palette (entries are 0..63, scaled by 4). */
 	const uint32_t pixelCount = w * h;
 	std::vector<uint8_t> rgba(static_cast<size_t>(pixelCount) * 4);
 	uint8_t *out = rgba.data();
@@ -343,7 +347,7 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 		} else if (c == 255 && (bmflags & BM_FLAG_TRANSPARENT)) {
 			out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
 		} else {
-			const rgb_t &col = gr_current_pal[c];
+			const rgb_t &col = gr_palette[c];
 			out[0] = col.r * 4;
 			out[1] = col.g * 4;
 			out[2] = col.b * 4;
