@@ -138,6 +138,8 @@ vks_vertex_alloc vks_alloc_vertices(uint32_t count);
 vks_vertex_alloc vks_alloc_bytes(uint32_t bytes);
 /* The command buffer being recorded for the current in-flight frame. */
 VkCommandBuffer vks_get_command_buffer();
+/* True while a frame's command buffer is open (between begin and present). */
+bool vks_is_frame_recording();
 
 
 /* Shutdown */

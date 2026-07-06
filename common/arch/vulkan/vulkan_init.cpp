@@ -1118,6 +1118,10 @@ namespace dcx {
 /* True while the current frame's command buffer is recording and its render
  * pass is open. Draw calls append to it; vks_present_frame() closes it. */
 static bool vk_frame_recording = false;
+bool vks_is_frame_recording()
+{
+	return vk_frame_recording;
+}
 
 /* Set when acquire/present reports the swapchain out of date (or suboptimal);
  * vks_begin_frame rebuilds it before the next acquire. */
@@ -1206,6 +1210,9 @@ static bool vks_begin_frame()
 	 * reset only after a successful acquire below, so a failed acquire leaves
 	 * it signaled and this wait returns immediately next time. */
 	vkWaitForFences(vk_device, 1, &vk_in_flight_fences[vk_current_frame], VK_TRUE, UINT64_MAX);
+	/* Destroy textures freed during earlier frames now that every command
+	 * buffer that could reference them has completed (fence above + idle wait). */
+	vks_flush_pending_texture_frees(vk_current_frame);
 
 	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
 	if (vk_current_frame < vk_frame_vbs.size())

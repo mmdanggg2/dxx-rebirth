@@ -27,6 +27,42 @@ namespace dcx {
 static std::array<vks_texture, VKS_MAX_TEXTURES> texture_pool{};
 static std::vector<size_t> free_textures;
 
+/* Textures destroyed while a frame is recording cannot be freed at once:
+ * their descriptor sets may already be recorded into the current (or an
+ * in-flight) command buffer, and vkDeviceWaitIdle() does not wait for a
+ * command buffer that has not been submitted yet. Defer such destruction to
+ * a per-frame pending list drained at frame begin, where the fence wait
+ * guarantees every referencing command buffer has completed. Indexed by
+ * vk_current_frame; size must match VK_MAX_FRAMES_IN_FLIGHT. */
+constexpr uint32_t VKS_PENDING_SLOTS = 2;
+static std::array<std::vector<vks_texture *>, VKS_PENDING_SLOTS> pending_free;
+
+static void vks_destroy_texture(vks_texture *tex)
+{
+	if (tex->descriptor_set)
+		vkFreeDescriptorSets(vk_device, vk_descriptor_pool, 1, &tex->descriptor_set);
+	if (tex->sampler)
+		vkDestroySampler(vk_device, tex->sampler, nullptr);
+	if (tex->view)
+		vkDestroyImageView(vk_device, tex->view, nullptr);
+	if (tex->memory)
+		vkFreeMemory(vk_device, tex->memory, nullptr);
+	if (tex->image)
+		vkDestroyImage(vk_device, tex->image, nullptr);
+	if (tex->staging_buffer)
+		vkDestroyBuffer(vk_device, tex->staging_buffer, nullptr);
+	if (tex->staging_memory)
+		vkFreeMemory(vk_device, tex->staging_memory, nullptr);
+	tex->descriptor_set = VK_NULL_HANDLE;
+	tex->sampler = VK_NULL_HANDLE;
+	tex->view = VK_NULL_HANDLE;
+	tex->memory = VK_NULL_HANDLE;
+	tex->image = VK_NULL_HANDLE;
+	tex->staging_buffer = VK_NULL_HANDLE;
+	tex->staging_memory = VK_NULL_HANDLE;
+	free_textures.push_back(static_cast<size_t>(tex - texture_pool.data()));
+}
+
 static size_t allocate_texture_slot()
 {
 	if (!free_textures.empty()) {
@@ -366,41 +402,39 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 
 void vks_freebmtexture(grs_bitmap &bm)
 {
-	/* Game textures are bm_mode::linear (vks_loadbmtexture_f intentionally
-	 * keeps them linear), so check the vktexture pointer, not the bitmap type.
-	 * Mirrors ogl_freebmtexture which checks bm.gltexture. */
 	vks_texture *tex = bm.vktexture;
 	if (!tex)
 		return;
-	/* Descriptor sets may still be bound in in-flight command buffers.
-	 * We must wait for idle before freeing them, otherwise the descriptor
-	 * pool's internal accounting can become corrupted. */
-	vkDeviceWaitIdle(vk_device);
-	if (tex->descriptor_set)
-		vkFreeDescriptorSets(vk_device, vk_descriptor_pool, 1, &tex->descriptor_set);
-	if (tex->sampler)
-		vkDestroySampler(vk_device, tex->sampler, nullptr);
-	if (tex->view)
-		vkDestroyImageView(vk_device, tex->view, nullptr);
-	if (tex->memory)
-		vkFreeMemory(vk_device, tex->memory, nullptr);
-	if (tex->image)
-		vkDestroyImage(vk_device, tex->image, nullptr);
-	if (tex->staging_buffer)
-		vkDestroyBuffer(vk_device, tex->staging_buffer, nullptr);
-	if (tex->staging_memory)
-		vkFreeMemory(vk_device, tex->staging_memory, nullptr);
-	tex->descriptor_set = VK_NULL_HANDLE;
-	tex->sampler = VK_NULL_HANDLE;
-	tex->view = VK_NULL_HANDLE;
-	tex->memory = VK_NULL_HANDLE;
-	tex->image = VK_NULL_HANDLE;
-	tex->staging_buffer = VK_NULL_HANDLE;
-	tex->staging_memory = VK_NULL_HANDLE;
-
-	/* Return slot to free list */
-	free_textures.push_back(static_cast<size_t>(tex - texture_pool.data()));
+	/* Detach immediately so the bitmap will re-upload on next use rather than
+	 * keep serving the about-to-be-destroyed texture. */
 	bm.vktexture = nullptr;
+	if (vks_is_frame_recording())
+	{
+		/* A command buffer is open and/or another is in flight; the descriptor
+		 * set may still be referenced. Defer destruction to the next frame
+		 * begin, where the fence wait guarantees all referencing command
+		 * buffers have completed. */
+		pending_free[vk_current_frame % VKS_PENDING_SLOTS].push_back(tex);
+		return;
+	}
+	/* Outside the frame loop (e.g. level load): no command buffer is recording.
+	 * Wait for in-flight submissions, then destroy at once. */
+	vkDeviceWaitIdle(vk_device);
+	vks_destroy_texture(tex);
+}
+
+/* Drain pending texture destruction for `frame`. Called from vks_begin_frame
+ * after the per-frame fence wait, so every command buffer that could reference
+ * a pending texture has finished. */
+void vks_flush_pending_texture_frees(uint32_t frame)
+{
+	auto &v = pending_free[frame % VKS_PENDING_SLOTS];
+	if (v.empty())
+		return;
+	vkDeviceWaitIdle(vk_device);
+	for (auto *tex : v)
+		vks_destroy_texture(tex);
+	v.clear();
 }
 
 void vks_shutdown_textures()
@@ -431,6 +465,8 @@ void vks_shutdown_textures()
 		tex = vks_texture{};
 	}
 	free_textures.clear();
+	for (auto &v : pending_free)
+		v.clear();
 }
 
 /* 1x1 opaque-white texture used as the sampler source for flat primitives

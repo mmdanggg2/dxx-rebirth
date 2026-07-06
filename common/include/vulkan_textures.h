@@ -64,6 +64,8 @@ vks_texture* vks_get_free_texture();
 void vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags);
 void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter texfilt, bool texanis, bool edgepad);
 void vks_freebmtexture(grs_bitmap &bm);
+/* Drain deferred texture destruction for a frame slot (call at frame begin). */
+void vks_flush_pending_texture_frees(uint32_t frame);
 
 /* Destroy all Vulkan resources (called during shutdown) */
 void vks_shutdown_textures();
