@@ -83,7 +83,7 @@ vks_texture* vks_get_free_texture()
 	return &texture_pool[allocate_texture_slot()];
 }
 
-void vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags)
+bool vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags)
 {
 	t.width = w;
 	t.height = h;
@@ -184,7 +184,16 @@ void vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags)
 	dsAlloc.descriptorSetCount = 1;
 	dsAlloc.pSetLayouts = &vk_descriptor_set_layout;
 	result = vkAllocateDescriptorSets(vk_device, &dsAlloc, &t.descriptor_set);
-	if (!(result == VK_SUCCESS)) Error(__FILE__, __LINE__, __func__, "Vulkan: Failed to allocate texture descriptor set");
+	if (result != VK_SUCCESS) {
+		/* Descriptor pool exhausted (e.g. heavy texture churn while frees are
+		 * deferred). Tear down the partially-built texture and return its slot
+		 * rather than aborting; the caller leaves the bitmap untextured and the
+		 * draw path skips it. It will retry the upload on a later frame once
+		 * pending frees drain back into the pool. */
+		con_printf(CON_URGENT, "Vulkan: descriptor pool full; skipping %ux%u texture upload", w, h);
+		vks_destroy_texture(&t);
+		return false;
+	}
 
 	VkDescriptorImageInfo descImageInfo{};
 	descImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -200,6 +209,7 @@ void vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags)
 	descriptorWrite.descriptorCount = 1;
 	descriptorWrite.pImageInfo = &descImageInfo;
 	vkUpdateDescriptorSets(vk_device, 1, &descriptorWrite, 0, nullptr);
+	return true;
 }
 
 /* Allocate and begin a one-time-submit command buffer for transfer work
@@ -327,7 +337,8 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 	}
 
 	vks_texture *tex = vks_get_free_texture();
-	vks_init_texture(*tex, w, h, 0);
+	if (!vks_init_texture(*tex, w, h, 0))
+		return;	/* slot already returned by vks_destroy_texture; leave bm.vktexture null so the draw skips */
 
 	/* Expand paletted (1 byte/pixel) source into RGBA via gr_palette -- the
 	 * selected game/art palette (set by gr_use_palette_table / the PCX loader),
@@ -490,7 +501,8 @@ static vks_texture vk_white_texture;
 
 void vks_init_white_texture()
 {
-	vks_init_texture(vk_white_texture, 1, 1, 0);
+	if (!vks_init_texture(vk_white_texture, 1, 1, 0))
+		Error(__FILE__, __LINE__, __func__, "Vulkan: Failed to create white texture");
 
 	/* Upload a single white texel through a throwaway staging buffer. */
 	constexpr uint8_t white[4] = {255, 255, 255, 255};

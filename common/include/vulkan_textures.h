@@ -45,8 +45,13 @@ struct vks_texture
 };
 
 /* Upper bound on simultaneously live textures; sizes the texture pool and the
- * descriptor pool. Mirrors the software/OpenGL MAX_BITMAPS-class ceilings. */
-constexpr uint32_t VKS_MAX_TEXTURES = 512;
+ * descriptor pool. Needs headroom over the steady-state working set because
+ * vks_freebmtexture defers destruction of textures freed while a frame is
+ * recording (the recording command buffer still references their descriptor
+ * sets); those stay allocated for up to VK_MAX_FRAMES_IN_FLIGHT frames, so the
+ * high-water mark is the live set plus a couple of frames of churn. 2048 is
+ * comfortably above any Descent scene. */
+constexpr uint32_t VKS_MAX_TEXTURES = 2048;
 
 /* Texture filter enum — mirrors opengl_texture_filter */
 enum class vulkan_texture_filter : uint8_t
@@ -61,7 +66,7 @@ enum class vulkan_texture_filter : uint8_t
 
 /* Texture management */
 vks_texture* vks_get_free_texture();
-void vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags);
+bool vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags);
 void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter texfilt, bool texanis, bool edgepad);
 void vks_freebmtexture(grs_bitmap &bm);
 /* Drain deferred texture destruction for a frame slot (call at frame begin). */
