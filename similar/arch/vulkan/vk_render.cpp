@@ -526,16 +526,50 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	vks_emit_3d(tex->descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
 
-void g3_draw_sphere(grs_canvas &, g3_draw_sphere_point &, fix, uint8_t)
+void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint8_t color)
 {
+	/* Untextured filled circle ("sphere") facing the viewer, flat at the
+	 * point's depth -- mirrors ogl_drawcircle(20, GL_TRIANGLE_FAN) in the
+	 * OpenGL backend. Drawn through the 3D pipeline with the white texture
+	 * (so fragment colour = vertex colour); a 20-gon triangle fan (centre +
+	 * rim, with the rim closed back to its first point) fills it. */
+	if (!vks_prepare_3d(canvas))
+		return;
+	const float cx = f2fl(pnt.p3_vec.x);
+	const float cy = f2fl(pnt.p3_vec.y);
+	const float cz = f2fl(pnt.p3_vec.z);
+	const float r = f2fl(fixmul(rad, Matrix_scale.x));
+	const float cr = CPAL2Tr(color), cg = CPAL2Tg(color), cb = CPAL2Tb(color);
+	constexpr unsigned nsides = 20;
+	std::array<vks_vertex3d, nsides + 2> verts;
+	verts[0] = {cx, cy, cz, 0.f, 0.f, cr, cg, cb};
+	for (unsigned i = 0; i <= nsides; ++i) {
+		const float ang = 2.0f * 3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(nsides);
+		verts[i + 1] = {cx + r * cosf(ang), cy + r * sinf(ang), cz, 0.f, 0.f, cr, cg, cb};
+	}
+	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(verts.size()));
 }
 
-void g3_draw_line(const g3_draw_line_context &, g3_draw_line_point &, g3_draw_line_point &)
+void g3_draw_line(const g3_draw_line_context &context, g3_draw_line_point &p0, g3_draw_line_point &p1)
 {
+	/* 3D wireframe line. Endpoints arrive as rotated viewer-space points
+	 * (p3_vec); emit them through the 3D pipeline as a LINE_LIST, mirroring
+	 * the OpenGL backend's GL_LINES. The per-vertex colour is pre-baked in
+	 * context.color_array by g3_draw_line_colors. */
+	if (!vks_prepare_3d(context.canvas))
+		return;
+	vkCmdBindPipeline(vks_get_command_buffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, vk_3d_line_pipeline);
+	const auto &ca = context.color_array;
+	const vks_vertex3d verts[2] = {
+		{f2fl(p0.p3_vec.x), f2fl(p0.p3_vec.y), f2fl(p0.p3_vec.z), 0.f, 0.f, ca[0], ca[1], ca[2]},
+		{f2fl(p1.p3_vec.x), f2fl(p1.p3_vec.y), f2fl(p1.p3_vec.z), 0.f, 0.f, ca[4], ca[5], ca[6]},
+	};
+	vks_emit_3d(vk_white_descriptor_set, verts, 2);
 }
 
-void g3_draw_line(const g3_draw_line_context &, g3_draw_line_point &, g3_draw_line_point &, temporary_points_t &)
+void g3_draw_line(const g3_draw_line_context &context, g3_draw_line_point &p0, g3_draw_line_point &p1, temporary_points_t &)
 {
+	g3_draw_line(context, p0, p1);
 }
 
 void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth, const fix iheight, grs_bitmap &bm)

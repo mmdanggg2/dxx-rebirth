@@ -49,6 +49,7 @@ VkPipeline vk_2d_pipeline;
 VkPipeline vk_3d_pipeline;
 VkPipeline vk_3d_pipeline_additive_a;
 VkPipeline vk_3d_pipeline_additive_c;
+VkPipeline vk_3d_line_pipeline;
 VkRenderPass vk_render_pass;
 VkDescriptorSetLayout vk_descriptor_set_layout;
 VkPipelineLayout vk_2d_pipeline_layout;
@@ -872,10 +873,8 @@ void vks_init_pipeline()
 		vertexInput.pVertexBindingDescriptions = &bindingDesc;
 		vertexInput.vertexAttributeDescriptionCount = 3;
 		vertexInput.pVertexAttributeDescriptions = attrs;
-
-		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-		inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
+		/* (inputAssembly is built per-pipeline inside make_3d so the line
+		 * pipeline can use LINE_LIST while polygon pipelines use TRIANGLE_FAN.) */
 
 		VkPipelineRasterizationStateCreateInfo rasterizer = make_rasterizer();
 
@@ -901,7 +900,10 @@ void vks_init_pipeline()
 		 * core drawn before its outer shell -- combine instead of the shell
 		 * occluding the core. Mirrors ogl_set_blending: additive_a is
 		 * (SRC_ALPHA, ONE), additive_c is (ONE, ONE). */
-		auto make_3d = [&](VkBlendFactor srcColor, VkBlendFactor dstColor, VkPipeline &out) {
+		auto make_3d = [&](VkBlendFactor srcColor, VkBlendFactor dstColor, VkPrimitiveTopology topology, VkPipeline &out) {
+			VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+			inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+			inputAssembly.topology = topology;
 			VkPipelineColorBlendAttachmentState b{};
 			b.blendEnable = VK_TRUE;
 			b.srcColorBlendFactor = srcColor;
@@ -935,9 +937,10 @@ void vks_init_pipeline()
 			if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &out) != VK_SUCCESS)
 				Error("Vulkan: Failed to create 3D graphics pipeline");
 		};
-		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, vk_3d_pipeline);
-		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, vk_3d_pipeline_additive_a);
-		make_3d(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, vk_3d_pipeline_additive_c);
+		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline);
+		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline_additive_a);
+		make_3d(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline_additive_c);
+		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, vk_3d_line_pipeline);
 	}
 }
 
@@ -1118,6 +1121,8 @@ void vks_shutdown()
 		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
 	if (vk_3d_pipeline_additive_c)
 		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
+	if (vk_3d_line_pipeline)
+		vkDestroyPipeline(vk_device, vk_3d_line_pipeline, nullptr);
 	if (vk_2d_pipeline_layout)
 		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
 	if (vk_render_pass)
@@ -1194,6 +1199,8 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
 		if (vk_3d_pipeline_additive_c)
 			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
+		if (vk_3d_line_pipeline)
+			vkDestroyPipeline(vk_device, vk_3d_line_pipeline, nullptr);
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 		vk_swapchain = VK_NULL_HANDLE;
 		for (auto &view : vk_swapchain_image_views)
