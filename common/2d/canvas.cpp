@@ -118,7 +118,7 @@ void gr_settransblend(grs_canvas &canvas, const gr_fade_level fade_level, const 
 #if DXX_USE_OGL
 	ogl_set_blending(blend_func);
 #elif DXX_USE_VULKAN
-	(void)blend_func;
+	vks_set_blend(blend_func);
 #endif
 }
 

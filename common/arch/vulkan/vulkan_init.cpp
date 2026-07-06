@@ -47,6 +47,8 @@ VkFormat vk_depth_format;
 
 VkPipeline vk_2d_pipeline;
 VkPipeline vk_3d_pipeline;
+VkPipeline vk_3d_pipeline_additive_a;
+VkPipeline vk_3d_pipeline_additive_c;
 VkRenderPass vk_render_pass;
 VkDescriptorSetLayout vk_descriptor_set_layout;
 VkPipelineLayout vk_2d_pipeline_layout;
@@ -892,24 +894,50 @@ void vks_init_pipeline()
 		stages[0].pName = "main";
 		stages[1] = fragStage;
 
-		VkGraphicsPipelineCreateInfo info{};
-		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-		info.stageCount = 2;
-		info.pStages = stages;
-		info.pVertexInputState = &vertexInput;
-		info.pInputAssemblyState = &inputAssembly;
-		info.pViewportState = &viewportState;
-		info.pRasterizationState = &rasterizer;
-		info.pMultisampleState = &multisampling;
-		info.pColorBlendState = &colorBlending;
-		info.pDepthStencilState = &depthStencil;
-		info.pDynamicState = &dynamicState;
-		info.layout = vk_2d_pipeline_layout;
-		info.renderPass = vk_render_pass;
-		info.subpass = 0;
-
-		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_3d_pipeline) != VK_SUCCESS)
-			Error("Vulkan: Failed to create 3D graphics pipeline");
+		/* Build a 3D pipeline with the given colour blend factors. Depth config
+		 * is identical for all blend modes: additive layers still depth-test
+		 * against the mine (so glows hide behind walls) but ADD rather than
+		 * replace, so overlapping additive layers -- a weapon's bright inner
+		 * core drawn before its outer shell -- combine instead of the shell
+		 * occluding the core. Mirrors ogl_set_blending: additive_a is
+		 * (SRC_ALPHA, ONE), additive_c is (ONE, ONE). */
+		auto make_3d = [&](VkBlendFactor srcColor, VkBlendFactor dstColor, VkPipeline &out) {
+			VkPipelineColorBlendAttachmentState b{};
+			b.blendEnable = VK_TRUE;
+			b.srcColorBlendFactor = srcColor;
+			b.dstColorBlendFactor = dstColor;
+			b.colorBlendOp = VK_BLEND_OP_ADD;
+			b.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+			b.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+			b.alphaBlendOp = VK_BLEND_OP_ADD;
+			b.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+				VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+			VkPipelineColorBlendStateCreateInfo cb{};
+			cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+			cb.logicOpEnable = VK_FALSE;
+			cb.attachmentCount = 1;
+			cb.pAttachments = &b;
+			VkGraphicsPipelineCreateInfo info{};
+			info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+			info.stageCount = 2;
+			info.pStages = stages;
+			info.pVertexInputState = &vertexInput;
+			info.pInputAssemblyState = &inputAssembly;
+			info.pViewportState = &viewportState;
+			info.pRasterizationState = &rasterizer;
+			info.pMultisampleState = &multisampling;
+			info.pColorBlendState = &cb;
+			info.pDepthStencilState = &depthStencil;
+			info.pDynamicState = &dynamicState;
+			info.layout = vk_2d_pipeline_layout;
+			info.renderPass = vk_render_pass;
+			info.subpass = 0;
+			if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &out) != VK_SUCCESS)
+				Error("Vulkan: Failed to create 3D graphics pipeline");
+		};
+		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, vk_3d_pipeline);
+		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, vk_3d_pipeline_additive_a);
+		make_3d(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, vk_3d_pipeline_additive_c);
 	}
 }
 
@@ -1086,6 +1114,10 @@ void vks_shutdown()
 		vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
 	if (vk_3d_pipeline)
 		vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
+	if (vk_3d_pipeline_additive_a)
+		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
+	if (vk_3d_pipeline_additive_c)
+		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
 	if (vk_2d_pipeline_layout)
 		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
 	if (vk_render_pass)
@@ -1124,6 +1156,12 @@ bool vks_is_frame_recording()
 	return vk_frame_recording;
 }
 
+/* Current 3D blend mode. Set by gr_settransblend (via vks_set_blend) and read
+ * by vks_prepare_3d to pick the matching 3D pipeline. */
+static gr_blend vk_current_blend = gr_blend::normal;
+void vks_set_blend(gr_blend b) { vk_current_blend = b; }
+gr_blend vks_get_blend() { return vk_current_blend; }
+
 /* Set when acquire/present reports the swapchain out of date (or suboptimal);
  * vks_begin_frame rebuilds it before the next acquire. */
 static bool vk_need_recreate = false;
@@ -1152,6 +1190,10 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
 		if (vk_3d_pipeline)
 			vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
+		if (vk_3d_pipeline_additive_a)
+			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
+		if (vk_3d_pipeline_additive_c)
+			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 		vk_swapchain = VK_NULL_HANDLE;
 		for (auto &view : vk_swapchain_image_views)

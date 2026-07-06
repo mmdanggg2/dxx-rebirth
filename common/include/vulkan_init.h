@@ -55,6 +55,13 @@ extern VkRenderPass vk_render_pass;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
 extern VkPipelineLayout vk_2d_pipeline_layout;
 extern VkPipeline vk_3d_pipeline;
+extern VkPipeline vk_3d_pipeline_additive_a;
+extern VkPipeline vk_3d_pipeline_additive_c;
+/* Current 3D blend mode (set via gr_settransblend); selects the 3D pipeline
+ * so additive draws (weapon cores, explosions, glows) combine rather than
+ * replace. Mirrors ogl_set_blending. */
+void vks_set_blend(gr_blend b);
+gr_blend vks_get_blend();
 extern VkDescriptorPool vk_descriptor_pool;
 
 /* 1x1 white texture descriptor set, bound for flat primitives (rect/line/pixel)

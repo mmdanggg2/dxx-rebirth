@@ -121,7 +121,13 @@ static bool vks_prepare_3d(grs_canvas &canvas)
 	if (!vks_ensure_frame())
 		return false;
 	VkCommandBuffer cmd = vks_get_command_buffer();
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_3d_pipeline);
+	VkPipeline pipe = vk_3d_pipeline;
+	switch (vks_get_blend()) {
+		case gr_blend::additive_a: pipe = vk_3d_pipeline_additive_a; break;
+		case gr_blend::additive_c: pipe = vk_3d_pipeline_additive_c; break;
+		default: break;
+	}
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 	const float x = static_cast<float>(canvas.cv_bitmap.bm_x);
 	const float y = static_cast<float>(canvas.cv_bitmap.bm_y);
 	const float w = static_cast<float>(canvas.cv_bitmap.bm_w);
