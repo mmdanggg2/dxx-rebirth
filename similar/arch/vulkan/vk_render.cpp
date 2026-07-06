@@ -477,7 +477,7 @@ void _g3_draw_poly(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	std::array<vks_vertex3d, MAX_POINTS_PER_POLY> verts;
 	for (uint32_t i = 0; i < nv; i++) {
 		const auto &pv = pointlist[i]->p3_vec;
-		verts[i] = {f2fl(pv.x), f2fl(pv.y), f2fl(pv.z), 0.f, 0.f, cr, cg, cb};
+		verts[i] = {f2fl(pv.x), f2fl(pv.y), f2fl(pv.z), 0.f, 0.f, cr, cg, cb, 1.f};
 	}
 	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
@@ -522,6 +522,7 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 			vt.g = f2fl(light_rgb[i].g);
 			vt.b = f2fl(light_rgb[i].b);
 		}
+		vt.a = 1.f;
 	}
 	vks_emit_3d(tex->descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
@@ -542,10 +543,10 @@ void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint
 	const float cr = CPAL2Tr(color), cg = CPAL2Tg(color), cb = CPAL2Tb(color);
 	constexpr unsigned nsides = 20;
 	std::array<vks_vertex3d, nsides + 2> verts;
-	verts[0] = {cx, cy, cz, 0.f, 0.f, cr, cg, cb};
+	verts[0] = {cx, cy, cz, 0.f, 0.f, cr, cg, cb, 1.f};
 	for (unsigned i = 0; i <= nsides; ++i) {
 		const float ang = 2.0f * 3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(nsides);
-		verts[i + 1] = {cx + r * cosf(ang), cy + r * sinf(ang), cz, 0.f, 0.f, cr, cg, cb};
+		verts[i + 1] = {cx + r * cosf(ang), cy + r * sinf(ang), cz, 0.f, 0.f, cr, cg, cb, 1.f};
 	}
 	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(verts.size()));
 }
@@ -561,8 +562,8 @@ void g3_draw_line(const g3_draw_line_context &context, g3_draw_line_point &p0, g
 	vkCmdBindPipeline(vks_get_command_buffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, vk_3d_line_pipeline);
 	const auto &ca = context.color_array;
 	const vks_vertex3d verts[2] = {
-		{f2fl(p0.p3_vec.x), f2fl(p0.p3_vec.y), f2fl(p0.p3_vec.z), 0.f, 0.f, ca[0], ca[1], ca[2]},
-		{f2fl(p1.p3_vec.x), f2fl(p1.p3_vec.y), f2fl(p1.p3_vec.z), 0.f, 0.f, ca[4], ca[5], ca[6]},
+		{f2fl(p0.p3_vec.x), f2fl(p0.p3_vec.y), f2fl(p0.p3_vec.z), 0.f, 0.f, ca[0], ca[1], ca[2], 1.f},
+		{f2fl(p1.p3_vec.x), f2fl(p1.p3_vec.y), f2fl(p1.p3_vec.z), 0.f, 0.f, ca[4], ca[5], ca[6], 1.f},
 	};
 	vks_emit_3d(vk_white_descriptor_set, verts, 2);
 }
@@ -611,14 +612,18 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	const float v0 = static_cast<float>(bm.bm_y) / th;
 	const float v1 = static_cast<float>(bm.bm_y + bm.bm_h) / th;
 
-	/* White vertex color: the sprite texture carries its own color (no lighting
+	/* Sprite fade: dim the billboard with the canvas fade level, mirroring the
+	 * OpenGL backend (cv_fade_level < GR_FADE_OFF => semi-transparent). White
+	 * vertex colour: the sprite texture carries its own colour (no lighting
 	 * modulation). +y viewer = up on screen; v=0 is the top row of the bitmap,
 	 * so the sprite appears upright. Triangle fan: TL, TR, BR, BL. */
+	const float alpha = canvas.cv_fade_level >= GR_FADE_OFF ? 1.0f
+		: (1.0f - static_cast<float>(canvas.cv_fade_level) / (static_cast<float>(GR_FADE_LEVELS) - 1.0f));
 	const vks_vertex3d verts[4] = {
-		{cx - w, cy + h, cz, u0, v0, 1.f, 1.f, 1.f},
-		{cx + w, cy + h, cz, u1, v0, 1.f, 1.f, 1.f},
-		{cx + w, cy - h, cz, u1, v1, 1.f, 1.f, 1.f},
-		{cx - w, cy - h, cz, u0, v1, 1.f, 1.f, 1.f},
+		{cx - w, cy + h, cz, u0, v0, 1.f, 1.f, 1.f, alpha},
+		{cx + w, cy + h, cz, u1, v0, 1.f, 1.f, 1.f, alpha},
+		{cx + w, cy - h, cz, u1, v1, 1.f, 1.f, 1.f, alpha},
+		{cx - w, cy - h, cz, u0, v1, 1.f, 1.f, 1.f, alpha},
 	};
 	vks_emit_3d(tex->descriptor_set, verts, 4);
 }

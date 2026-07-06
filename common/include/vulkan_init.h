@@ -122,14 +122,17 @@ struct vks_vertex
 	float u, v;       /* texture coordinates */
 	float r, g, b, a; /* modulating color */
 };
-/* 3D vertex: viewer-relative position (f2fl), texture coords, lighting color.
- * Also 32 bytes (8 floats), so it shares the per-frame vertex buffer with the
- * 2D vertex via vks_alloc_bytes. */
+/* 3D vertex: viewer-relative position (f2fl), texture coords, color+alpha.
+ * 36 bytes (9 floats); shares the per-frame vertex buffer with the 2D vertex
+ * via vks_alloc_bytes (raw bytes, so the differing stride is fine). The alpha
+ * carries the canvas fade level for sprites (g3_draw_bitmap); opaque (1.0) for
+ * every other 3D draw. */
 struct vks_vertex3d
 {
 	float x, y, z; /* viewer-relative position (f2fl) */
 	float u, v;    /* texture coordinates (f2fl) */
 	float r, g, b; /* modulating light/color */
+	float a;       /* vertex alpha (sprite fade; 1.0 = opaque) */
 };
 struct vks_vertex_alloc
 {

@@ -865,7 +865,7 @@ void vks_init_pipeline()
 		VkVertexInputAttributeDescription attrs[3]{};
 		attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
 		attrs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(vks_vertex3d, u)};
-		attrs[2] = {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(vks_vertex3d, r)};
+		attrs[2] = {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(vks_vertex3d, r)};
 
 		VkPipelineVertexInputStateCreateInfo vertexInput{};
 		vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
