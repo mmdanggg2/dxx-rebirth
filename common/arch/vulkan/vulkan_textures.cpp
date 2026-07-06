@@ -409,6 +409,15 @@ void vks_freebmtexture(grs_bitmap &bm)
 	vks_texture *tex = bm.vktexture;
 	if (!tex)
 		return;
+	/* The device is gone: static destructors (e.g. ~Gamefonts) run during
+	 * exit(), after gr_close/vks_shutdown already tore Vulkan down. The
+	 * texture's Vulkan resources were freed by shutdown; just drop the
+	 * dangling reference and let the OS reclaim the rest. */
+	if (!vk_device)
+	{
+		bm.vktexture = nullptr;
+		return;
+	}
 	/* Detach immediately so the bitmap will re-upload on next use rather than
 	 * keep serving the about-to-be-destroyed texture. */
 	bm.vktexture = nullptr;

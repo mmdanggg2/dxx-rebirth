@@ -1102,6 +1102,7 @@ void vks_shutdown()
 		vkDestroyCommandPool(vk_device, pool, nullptr);
 
 	vkDestroyDevice(vk_device, nullptr);
+	vk_device = VK_NULL_HANDLE;
 	vkDestroySurfaceKHR(vk_instance, vk_surface, nullptr);
 	
 	if (vk_debug_messenger)
