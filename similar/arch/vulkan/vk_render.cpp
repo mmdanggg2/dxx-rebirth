@@ -379,48 +379,83 @@ bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned 
 }
 
 /* Line drawing */
-void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c)
-{
-	const auto &col = vks_palette_colors[c];
-	const float cr = col[0], cg = col[1], cb = col[2];
-	const float ca = vks_fade_alpha(canvas);
-	/* Endpoints at pixel centres, offset by the canvas origin. */
-	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x) + 0.5f;
-	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y) + 0.5f;
-	const float x0 = left + ox, y0 = top + oy;
-	const float x1 = right + ox, y1 = bot + oy;
-	const float half = vks_linedotscale() * 0.5f;
 
+/* Write a `width`-pixel-thick quad (two triangles, 6 vertices) from (x0,y0)
+ * to (x1,y1) into `out`, coloured c0 at the first end and c1 at the second
+ * (GL_LINES' per-vertex colours). The quad extends half a width past both
+ * endpoints so the end pixels are covered. Returns the next free vertex. */
+static vks_vertex *vks_line_quad(vks_vertex *out, const float x0, const float y0, const vks_colors::array_type &c0, const float x1, const float y1, const vks_colors::array_type &c1, const float width)
+{
+	const float half = width * 0.5f;
 	const float dx = x1 - x0, dy = y1 - y0;
 	const float len = std::sqrt(dx * dx + dy * dy);
 	/* Unit direction (any direction for a degenerate line) and its
-	 * perpendicular. The quad extends half a line width past both endpoints
-	 * so the end pixels are covered, matching the inclusive software line. */
+	 * perpendicular. */
 	const float ux = len < 0.5f ? 1.f : dx / len;
 	const float uy = len < 0.5f ? 0.f : dy / len;
 	const float ex = ux * half, ey = uy * half;
 	const float px = -uy * half, py = ux * half;
 	const float ax = x0 - ex, ay = y0 - ey;
 	const float bx = x1 + ex, by = y1 + ey;
-	const vks_vertex v[6] = {
-		{ax + px, ay + py, 0.f, 0.f, cr, cg, cb, ca},
-		{bx + px, by + py, 0.f, 0.f, cr, cg, cb, ca},
-		{bx - px, by - py, 0.f, 0.f, cr, cg, cb, ca},
-		{ax + px, ay + py, 0.f, 0.f, cr, cg, cb, ca},
-		{bx - px, by - py, 0.f, 0.f, cr, cg, cb, ca},
-		{ax - px, ay - py, 0.f, 0.f, cr, cg, cb, ca},
-	};
-	if (!vks_prepare_2d())
-		return;
-	vks_emit(vk_white_descriptor_set, v, 6);
+	const vks_vertex a0{ax + px, ay + py, 0.f, 0.f, c0[0], c0[1], c0[2], c0[3]};
+	const vks_vertex a1{ax - px, ay - py, 0.f, 0.f, c0[0], c0[1], c0[2], c0[3]};
+	const vks_vertex b0{bx + px, by + py, 0.f, 0.f, c1[0], c1[1], c1[2], c1[3]};
+	const vks_vertex b1{bx - px, by - py, 0.f, 0.f, c1[0], c1[1], c1[2], c1[3]};
+	*out++ = a0;
+	*out++ = b0;
+	*out++ = b1;
+	*out++ = a0;
+	*out++ = b1;
+	*out++ = a1;
+	return out;
 }
 
-/* 3D texture-mapped polygon drawing */
-void _vks_draw_tmap_2(grs_canvas & /*canvas*/, std::span<g3_draw_tmap_point *const> /*pointlist*/,
-	std::span<const g3s_uvl, 4> /*uvl_list*/, std::span<const g3s_lrgb, 4> /*light_rgb*/,
-	grs_bitmap & /*bmbot*/, grs_bitmap & /*bm*/, texture2_rotation_low /*orient*/, tmap_drawer_type /*tmap_drawer_ptr*/)
+void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c)
 {
-	/* Placeholder: would submit a textured polygon draw */
+	const auto &col = vks_palette_colors[c];
+	const vks_colors::array_type color{{col[0], col[1], col[2], vks_fade_alpha(canvas)}};
+	/* Endpoints at pixel centres, offset by the canvas origin. */
+	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x) + 0.5f;
+	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y) + 0.5f;
+	std::array<vks_vertex, 6> v;
+	vks_line_quad(v.data(), left + ox, top + oy, color, right + ox, bot + oy, color, vks_linedotscale());
+	if (!vks_prepare_2d())
+		return;
+	vks_emit(vk_white_descriptor_set, v.data(), v.size());
+}
+
+/* Circle outline / filled disk centred on (xc,yc) (canvas-relative, fixed
+ * point) with radius r pixels, as the OpenGL gr_ucircle / gr_disk. */
+static void vks_circle(grs_canvas &canvas, const fix xc, const fix yc, const fix r, const color_palette_index c, const bool filled)
+{
+	const auto &col = vks_palette_colors[c];
+	const vks_colors::array_type color{{col[0], col[1], col[2], vks_fade_alpha(canvas)}};
+	const float cx = f2fl(xc) + canvas.cv_bitmap.bm_x + 0.5f;
+	const float cy = f2fl(yc) + canvas.cv_bitmap.bm_y + 0.5f;
+	const float rad = f2fl(r);
+	const unsigned nsides = 10 + 2 * static_cast<unsigned>(M_PI * rad / 19);
+	const auto rim = [=](const unsigned i) {
+		const float ang = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i % nsides) / static_cast<float>(nsides);
+		return std::array<float, 2>{{cx + rad * cosf(ang), cy + rad * sinf(ang)}};
+	};
+	std::vector<vks_vertex> v(nsides * (filled ? 3 : 6));
+	auto out = v.data();
+	const float lw = vks_linedotscale();
+	for (unsigned i = 0; i != nsides; ++i)
+	{
+		const auto p0 = rim(i), p1 = rim(i + 1);
+		if (filled)
+		{
+			*out++ = {cx, cy, 0.f, 0.f, color[0], color[1], color[2], color[3]};
+			*out++ = {p0[0], p0[1], 0.f, 0.f, color[0], color[1], color[2], color[3]};
+			*out++ = {p1[0], p1[1], 0.f, 0.f, color[0], color[1], color[2], color[3]};
+		}
+		else
+			out = vks_line_quad(out, p0[0], p0[1], color, p1[0], p1[1], color, lw);
+	}
+	if (!vks_prepare_2d())
+		return;
+	vks_emit(vk_white_descriptor_set, v.data(), static_cast<uint32_t>(v.size()));
 }
 
 /* Color palette conversion */
@@ -447,11 +482,108 @@ const vks_colors::array_type &vks_colors::init_maybe_white(int c)
 	return init_palette(static_cast<unsigned>(c));
 }
 
-/* UI elements */
-void vks_draw_vertex_reticle(grs_canvas & /*canvas*/, int /*cross*/, int /*primary*/, int /*secondary*/,
-	int /*color*/, int /*alpha*/, int /*size_offs*/)
+/* "Classic Reboot" vector reticle, a port of ogl_draw_vertex_reticle. The
+ * shapes are authored in reticle units around the canvas centre (+y up);
+ * one unit is `size` fixed-point screen fractions, corrected for aspect so
+ * the reticle stays round. */
+void vks_draw_vertex_reticle(grs_canvas &canvas, const int cross, const int primary, const int secondary, const int color, const int alpha, const int size_offs)
 {
-	/* Placeholder: would draw the crosshair */
+	int size = 270 + (size_offs * 20);
+	const float scale = static_cast<float>(SWIDTH) / SHEIGHT;
+	const auto &rgb = gr_palette[color];
+	const vks_colors::array_type bright{{
+		rgb.r / 63.0f,
+		rgb.g / 63.0f,
+		rgb.b / 63.0f,
+		1.0f - (static_cast<float>(alpha) / static_cast<float>(GR_FADE_LEVELS))
+	}}, dark{{bright[0] / 2, bright[1] / 2, bright[2] / 2, bright[3] / 2}};
+
+	float sx, sy;
+	if (scale >= 1)
+	{
+		size /= scale;
+		sx = f2fl(size);
+		sy = f2fl(size * scale);
+	}
+	else
+	{
+		size *= scale;
+		sx = f2fl(size / scale);
+		sy = f2fl(size);
+	}
+	const float ux = sx * last_width, uy = sy * last_height;
+	const float cx = canvas.cv_bitmap.bm_w / 2 + canvas.cv_bitmap.bm_x;
+	const float cy = canvas.cv_bitmap.bm_h / 2 + canvas.cv_bitmap.bm_y;
+	const auto px = [=](const float x) { return cx + x * ux; };
+	const auto py = [=](const float y) { return cy - y * uy; };
+	const float lw = vks_linedotscale() * 2;
+
+	/* 4 cross lines + 4 primary bar strips (2 triangles each) + up to two
+	 * 16-segment secondary rings. */
+	std::array<vks_vertex, 4 * 6 + 4 * 6 + 2 * 16 * 6> v;
+	auto out = v.data();
+
+	//cross
+	static constexpr std::array<float, 8 * 2> cross_lva{{
+		-4.0, 2.0, -2.0, 0, -3.0, -4.0, -2.0, -3.0, 4.0, 2.0, 2.0, 0, 3.0, -4.0, 2.0, -3.0,
+	}};
+	for (unsigned i = 0; i != cross_lva.size(); i += 4)
+		out = vks_line_quad(out, px(cross_lva[i]), py(cross_lva[i + 1]), dark, px(cross_lva[i + 2]), py(cross_lva[i + 3]), cross ? bright : dark, lw);
+
+	/* Primary bars: each a 4-vertex triangle strip; the first two vertices
+	 * take `c0`, the last two `c1`. */
+	const auto strip = [&](const std::array<float, 4 * 2> &lva, const vks_colors::array_type &c0, const vks_colors::array_type &c1) {
+		const auto vtx = [&](const unsigned i, const vks_colors::array_type &c) {
+			return vks_vertex{px(lva[i * 2]), py(lva[i * 2 + 1]), 0.f, 0.f, c[0], c[1], c[2], c[3]};
+		};
+		const auto v0 = vtx(0, c0), v1 = vtx(1, c0), v2 = vtx(2, c1), v3 = vtx(3, c1);
+		*out++ = v0;
+		*out++ = v1;
+		*out++ = v2;
+		*out++ = v1;
+		*out++ = v3;
+		*out++ = v2;
+	};
+	static constexpr std::array<float, 4 * 2> primary_lva0{{
+		-5.5, -5.0, -6.5, -7.5, -10.0, -7.0, -10.0, -8.7
+	}};
+	static constexpr std::array<float, 4 * 2> primary_lva1{{
+		-10.0, -7.0, -10.0, -8.7, -15.0, -8.5, -15.0, -9.5
+	}};
+	static constexpr std::array<float, 4 * 2> primary_lva2{{
+		5.5, -5.0, 6.5, -7.5, 10.0, -7.0, 10.0, -8.7
+	}};
+	static constexpr std::array<float, 4 * 2> primary_lva3{{
+		10.0, -7.0, 10.0, -8.7, 15.0, -8.5, 15.0, -9.5
+	}};
+	const auto &inner0 = primary == 0 ? dark : bright;
+	const auto &inner1 = dark;
+	const auto &outer0 = dark;
+	const auto &outer1 = primary == 2 ? bright : dark;
+	strip(primary_lva0, inner0, inner1);
+	strip(primary_lva1, outer0, outer1);
+	strip(primary_lva2, inner0, inner1);
+	strip(primary_lva3, outer0, outer1);
+
+	/* Secondary indicator: a 16-segment circle of radius 2 units. */
+	const auto ring = [&](const float ox, const float oy, const vks_colors::array_type &c) {
+		for (unsigned i = 0; i != 16; ++i)
+		{
+			const float a0 = 2.0f * static_cast<float>(M_PI) * i / 16;
+			const float a1 = 2.0f * static_cast<float>(M_PI) * (i + 1) / 16;
+			out = vks_line_quad(out, px(cosf(a0) * 2.0f + ox), py(sinf(a0) * 2.0f + oy), c, px(cosf(a1) * 2.0f + ox), py(sinf(a1) * 2.0f + oy), c, lw);
+		}
+	};
+	if (secondary <= 2)
+	{
+		ring(-10.0f, -2.0f, secondary != 1 ? dark : bright);
+		ring(10.0f, -2.0f, secondary != 2 ? dark : bright);
+	}
+	else
+		ring(0.0f, -8.0f, secondary != 4 ? dark : bright);
+	if (!vks_prepare_2d())
+		return;
+	vks_emit(vk_white_descriptor_set, v.data(), static_cast<uint32_t>(out - v.data()));
 }
 
 void gr_palette_load(const palette_array_t &pal)
@@ -471,11 +603,10 @@ void gr_palette_load(const palette_array_t &pal)
 } /* namespace dcx */
 
 namespace dcx {
-/* Sentinels: the mine renderer passes these (as tmap_drawer_type function
- * pointers) so _g3_draw_tmap can distinguish textured vs. cloaked faces. They
- * are defined (as no-ops) below. */
-void draw_tmap(grs_canvas &, const grs_bitmap &, std::span<const g3_draw_tmap_point *const>);
-void draw_tmap_flat(grs_canvas &, const grs_bitmap &, std::span<const g3_draw_tmap_point *const>);
+/* draw_tmap / draw_tmap_flat (declared in texmap.h) are sentinels: the mine
+ * renderer passes them as tmap_drawer_type function pointers so _g3_draw_tmap
+ * can distinguish textured vs. cloaked faces. They are defined (as no-ops)
+ * below. */
 
 /* 3D polygon drawing (mine walls, objects). Vertices are viewer-relative
  * g3_rotated_point coords; the 3D pipeline projects them with a 90-degree
@@ -672,13 +803,15 @@ void gr_ubitmapm(grs_canvas &canvas, unsigned x, unsigned y, grs_bitmap &bm)
 	vks_ubitmapm_cs(canvas, static_cast<int>(x), static_cast<int>(y), 0, 0, bm, vks_colors::white);
 }
 
-int gr_ucircle(grs_canvas &, fix, fix, fix, color_palette_index)
+int gr_ucircle(grs_canvas &canvas, const fix xc1, const fix yc1, const fix r1, const color_palette_index c)
 {
+	vks_circle(canvas, xc1, yc1, r1, c, false);
 	return 0;
 }
 
-int gr_disk(grs_canvas &, fix, fix, fix, color_palette_index)
+int gr_disk(grs_canvas &canvas, const fix x, const fix y, const fix r, const color_palette_index c)
 {
+	vks_circle(canvas, x, y, r, c, true);
 	return 0;
 }
 

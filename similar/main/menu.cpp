@@ -1838,7 +1838,7 @@ void input_config()
 
 struct reticle_config_menu_items
 {
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 #define DXX_RETICLE_TYPE_OGL(VERB)	\
 	DXX_MENUITEM(VERB, RADIO, "Classic Reboot", opt_reticle_classic_reboot, 0, optgrp_reticle)
 #else
@@ -1878,7 +1878,7 @@ struct reticle_config_menu_items
 		{
 			DXX_RETICLE_CONFIG_MENU(ADD);
 			auto i{underlying_value(PlayerCfg.ReticleType)};
-			if constexpr (!DXX_USE_OGL)
+			if constexpr (!DXX_USE_OGL && !DXX_USE_VULKAN)
 			{
 				if (i > 1)
 					--i;
@@ -1904,7 +1904,7 @@ window_event_result reticle_config_menu::event_handler(const d_event &event)
 			for (uint_fast32_t i = opt_reticle_classic; i != opt_label_blank_reticle_type; ++i)
 				if (m[i].value)
 				{
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 					if (i != opt_reticle_classic)
 						++i;
 #endif

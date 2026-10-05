@@ -3363,6 +3363,8 @@ void show_reticle(grs_canvas &canvas, const player_info &player_info, enum retic
 		case reticle_type::classic_reboot:
 #if DXX_USE_OGL
 			ogl_draw_vertex_reticle(canvas, cross_bm_num,primary_bm_num,secondary_bm_num,BM_XRGB(PlayerCfg.ReticleRGBA[0],PlayerCfg.ReticleRGBA[1],PlayerCfg.ReticleRGBA[2]),PlayerCfg.ReticleRGBA[3],PlayerCfg.ReticleSize);
+#elif DXX_USE_VULKAN
+			vks_draw_vertex_reticle(canvas, cross_bm_num,primary_bm_num,secondary_bm_num,BM_XRGB(PlayerCfg.ReticleRGBA[0],PlayerCfg.ReticleRGBA[1],PlayerCfg.ReticleRGBA[2]),PlayerCfg.ReticleRGBA[3],PlayerCfg.ReticleSize);
 #endif
 			return;
 		case reticle_type::x:
