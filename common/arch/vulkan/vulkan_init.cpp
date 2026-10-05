@@ -1481,10 +1481,30 @@ static bool vks_begin_frame()
 	return true;
 }
 
-/* Called from g3_start_frame at the start of each 3D frame. */
-void vks_start_frame(grs_canvas &)
+/* Called from g3_start_frame at the start of each 3D view. Several views can
+ * share one presented frame (main view, then rear-view/guided-missile insets),
+ * so, like ogl_start_frame's glClear(GL_DEPTH_BUFFER_BIT) and glBlendFunc
+ * reset, clear the depth under this canvas and restore normal blending. */
+void vks_start_frame(grs_canvas &canvas)
 {
-	vks_begin_frame();
+	if (!vks_begin_frame())
+		return;
+	vk_current_blend = gr_blend::normal;
+	const auto &bm = canvas.cv_bitmap;
+	const int32_t x0 = std::max<int32_t>(bm.bm_x, 0);
+	const int32_t y0 = std::max<int32_t>(bm.bm_y, 0);
+	const int32_t x1 = std::min<int32_t>(bm.bm_x + bm.bm_w, vk_surface_extent.width);
+	const int32_t y1 = std::min<int32_t>(bm.bm_y + bm.bm_h, vk_surface_extent.height);
+	if (x1 <= x0 || y1 <= y0)
+		return;
+	VkClearAttachment clear{};
+	clear.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	clear.clearValue.depthStencil = {1.0f, 0};
+	VkClearRect rect{};
+	rect.rect.offset = {x0, y0};
+	rect.rect.extent = {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)};
+	rect.layerCount = 1;
+	vkCmdClearAttachments(vk_command_buffers[vk_current_frame], 1, &clear, 1, &rect);
 }
 
 /* Ensure a frame is recording (begins one if none is open — begin_frame is
