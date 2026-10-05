@@ -167,7 +167,6 @@ void vks_start_frame(grs_canvas &);
 #if DXX_USE_STEREOSCOPIC_RENDER
 void vks_stereo_frame(bool left_eye, int xoff);
 #endif
-void vks_end_frame();
 /* Begin a frame if none is recording. Returns false if the swapchain is
  * unavailable (out of date); callers must skip drawing when it returns false. */
 bool vks_ensure_frame();

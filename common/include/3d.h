@@ -42,8 +42,6 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #else
 #include <GL/gl.h>
 #endif
-#elif DXX_USE_VULKAN
-#include "vulkan_init.h"
 #endif
 
 namespace dcx {
@@ -206,8 +204,6 @@ void g3_set_view_matrix(const vms_vector &view_pos,const vms_matrix &view_matrix
 //end the frame
 #if DXX_USE_OGL
 #define g3_end_frame() ogl_end_frame()
-#elif DXX_USE_VULKAN
-#define g3_end_frame() vks_end_frame()
 #else
 #define g3_end_frame()
 #endif

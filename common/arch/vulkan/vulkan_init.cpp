@@ -1640,14 +1640,6 @@ void vks_present_frame()
 		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed (result=%d)", static_cast<int>(result));
 }
 
-void vks_end_frame()
-{
-	/* Intentionally a no-op: the render pass stays open so 2D overlays drawn
-	 * after the 3D scene (HUD, menus) record into the same command buffer. It
-	 * is closed and submitted by vks_present_frame(). */
-}
-
-
 } /* namespace dcx */
 
 #endif /* DXX_USE_VULKAN */

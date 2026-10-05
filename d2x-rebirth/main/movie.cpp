@@ -59,6 +59,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #if DXX_USE_OGL
 #include "ogl_init.h"
 #include "game.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "args.h"
 
