@@ -101,12 +101,12 @@ static float vks_linedotscale()
  * vertex positions by each caller (adding canvas.cv_bitmap.bm_x/y), matching
  * the OpenGL backend which normalizes absolute coordinates against the full
  * screen via glOrtho(0,1). */
-static bool vks_prepare_2d()
+static bool vks_prepare_2d(const VkPipeline pipeline = vk_2d_pipeline)
 {
 	if (!vks_ensure_frame())
 		return false;
 	VkCommandBuffer cmd = vks_get_command_buffer();
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_2d_pipeline);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 	const float w = static_cast<float>(last_width);
 	const float h = static_cast<float>(last_height);
 	const VkViewport viewport{0.0f, 0.0f, w, h, 0.0f, 1.0f};
@@ -170,19 +170,68 @@ static void vks_emit_3d(VkDescriptorSet ds, const vks_vertex3d *src, uint32_t co
 	vkCmdDraw(cmd, count, 1, 0, 0);
 }
 
-/* gr_flip — the main display function. Closes and submits the current frame's
- * command buffer, presents the swapchain image, and advances to the next
- * in-flight frame. All draw submission/synchronization lives in
- * vks_present_frame() (vulkan_init.cpp). */
+/* Palette flash / brightness state (damage, pickup and invulnerability
+ * flashes, the gamma setting). As in the OpenGL backend, it is applied as a
+ * full-screen overlay just before the frame is presented. */
+static bool do_pal_step;
+static float last_r, last_g, last_b;
+
+static int gr_apply_gamma_clamp(const int v)
+{
+	if (v >= 0)
+		return std::max(v + gr_palette_gamma, 0);
+	else
+		return std::min(v + gr_palette_gamma, 0);
+}
+
+void gr_palette_step_up(int r, int g, int b)
+{
+	last_r = gr_apply_gamma_clamp(r) / 63.0f;
+	last_g = gr_apply_gamma_clamp(g) / 63.0f;
+	last_b = gr_apply_gamma_clamp(b) / 63.0f;
+	do_pal_step = (r || g || b || gr_palette_gamma);
+}
+
+/* Mirrors ogl_do_palfx: positive steps add the colour (ONE, ONE); an
+ * all-negative step darkens, scaled by 2.5 to match D1/D2, with
+ * (ZERO, ONE_MINUS_SRC_COLOR). */
+static void vks_do_palfx()
+{
+	if (!do_pal_step || !vks_is_frame_recording())
+		return;
+	float r = last_r, g = last_g, b = last_b;
+	VkPipeline pipeline;
+	if (last_r <= 0 && last_g <= 0 && last_b <= 0)
+	{
+		r = last_r * -2.5f;
+		g = last_g * -2.5f;
+		b = last_b * -2.5f;
+		pipeline = vk_2d_pipeline_darken;
+	}
+	else
+		pipeline = vk_2d_pipeline_additive;
+	const float w = static_cast<float>(last_width);
+	const float h = static_cast<float>(last_height);
+	const vks_vertex v[6] = {
+		{0.f, 0.f, 0.f, 0.f, r, g, b, 1.f},
+		{w, 0.f, 0.f, 0.f, r, g, b, 1.f},
+		{w, h, 0.f, 0.f, r, g, b, 1.f},
+		{0.f, 0.f, 0.f, 0.f, r, g, b, 1.f},
+		{w, h, 0.f, 0.f, r, g, b, 1.f},
+		{0.f, h, 0.f, 0.f, r, g, b, 1.f},
+	};
+	if (!vks_prepare_2d(pipeline))
+		return;
+	vks_emit(vk_white_descriptor_set, v, 6);
+}
+
+/* gr_flip — the main display function. Draws the palette-flash overlay, then
+ * closes and submits the current frame's command buffer, presents the
+ * swapchain image, and advances to the next in-flight frame. All draw
+ * submission/synchronization lives in vks_present_frame() (vulkan_init.cpp). */
 void gr_flip(void)
 {
-#if DXX_USE_STEREOSCOPIC_RENDER
-	/* Handle stereo rendering */
-	if (VR_stereo != StereoFormat::None) {
-		// Simplified — would need proper stereo implementation
-	}
-#endif
-
+	vks_do_palfx();
 	vks_present_frame();
 }
 
@@ -403,34 +452,6 @@ void vks_draw_vertex_reticle(grs_canvas & /*canvas*/, int /*cross*/, int /*prima
 	int /*color*/, int /*alpha*/, int /*size_offs*/)
 {
 	/* Placeholder: would draw the crosshair */
-}
-
-void vks_set_blending(gr_blend /*blend*/)
-{
-	/* Placeholder: would set VkPipelineColorBlendState */
-}
-
-/* Palette animation */
-void vks_do_palfx(void)
-{
-	(void)last_width;
-	(void)last_height;
-	/* Placeholder: handle palette effects */
-}
-
-/* Brightness/gamma controls */
-static int do_pal_step = 0;
-static float last_r = 0, last_g = 0, last_b = 0;
-
-void gr_palette_step_up(int r, int g, int b)
-{
-	(void)r;
-	(void)g;
-	(void)b;
-	do_pal_step = (r || g || b);
-	last_r = r / 63.0f;
-	last_g = g / 63.0f;
-	last_b = b / 63.0f;
 }
 
 void gr_palette_load(const palette_array_t &pal)

@@ -51,6 +51,10 @@ extern VkFormat vk_depth_format;
 
 /* Pipeline and render pass */
 extern VkPipeline vk_2d_pipeline;
+/* 2D full-screen palette-flash overlay pipelines (ogl_do_palfx): additive
+ * (ONE, ONE) and darkening (ZERO, ONE_MINUS_SRC_COLOR). */
+extern VkPipeline vk_2d_pipeline_additive;
+extern VkPipeline vk_2d_pipeline_darken;
 extern VkRenderPass vk_render_pass;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
 extern VkPipelineLayout vk_2d_pipeline_layout;
@@ -200,7 +204,6 @@ void vks_ulinec(grs_canvas &, int left, int top, int right, int bot, int c);
 
 /* UI elements */
 void vks_draw_vertex_reticle(grs_canvas &, int cross, int primary, int secondary, int color, int alpha, int size_offs);
-void vks_set_blending(gr_blend);
 
 /* Font rendering (Vulkan equivalent of ogl_internal_string) */
 void vks_internal_string(grs_canvas &, const grs_font &cv_font, int entry_x, int yy, const char *const s);

@@ -49,6 +49,8 @@ VkFormat vk_swapchain_format;
 VkFormat vk_depth_format;
 
 VkPipeline vk_2d_pipeline;
+VkPipeline vk_2d_pipeline_additive;
+VkPipeline vk_2d_pipeline_darken;
 VkPipeline vk_3d_pipeline;
 VkPipeline vk_3d_pipeline_additive_a;
 VkPipeline vk_3d_pipeline_additive_c;
@@ -992,6 +994,16 @@ void vks_init_pipeline()
 
 		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_2d_pipeline) != VK_SUCCESS)
 			Error("Vulkan: Failed to create 2D graphics pipeline");
+
+		/* Palette-flash overlays (ogl_do_palfx). */
+		blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+		blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_2d_pipeline_additive) != VK_SUCCESS)
+			Error("Vulkan: Failed to create 2D additive graphics pipeline");
+		blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+		blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+		if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &vk_2d_pipeline_darken) != VK_SUCCESS)
+			Error("Vulkan: Failed to create 2D darkening graphics pipeline");
 	}
 
 	/* --- 3D pipeline: pos(3)+uv(2)+color(3), triangle fan, depth test+write --- */
@@ -1240,6 +1252,17 @@ void vks_destroy_descriptor_pool()
 	}
 }
 
+/* Destroy every graphics pipeline created by vks_init_pipeline. */
+static void vks_destroy_pipelines()
+{
+	for (auto *const pipeline : {&vk_2d_pipeline, &vk_2d_pipeline_additive, &vk_2d_pipeline_darken, &vk_3d_pipeline, &vk_3d_pipeline_additive_a, &vk_3d_pipeline_additive_c, &vk_3d_line_pipeline})
+	{
+		if (*pipeline)
+			vkDestroyPipeline(vk_device, *pipeline, nullptr);
+		*pipeline = VK_NULL_HANDLE;
+	}
+}
+
 void vks_shutdown()
 {
 	vkDeviceWaitIdle(vk_device);
@@ -1268,16 +1291,7 @@ void vks_shutdown()
 		vkDestroyShaderModule(vk_device, vk_vertex_shader, nullptr);
 	if (vk_3d_vertex_shader)
 		vkDestroyShaderModule(vk_device, vk_3d_vertex_shader, nullptr);
-	if (vk_2d_pipeline)
-		vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
-	if (vk_3d_pipeline)
-		vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
-	if (vk_3d_pipeline_additive_a)
-		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
-	if (vk_3d_pipeline_additive_c)
-		vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
-	if (vk_3d_line_pipeline)
-		vkDestroyPipeline(vk_device, vk_3d_line_pipeline, nullptr);
+	vks_destroy_pipelines();
 	if (vk_2d_pipeline_layout)
 		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
 	if (vk_render_pass)
@@ -1346,16 +1360,7 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 
 		for (auto &fb : vk_framebuffers)
 			vkDestroyFramebuffer(vk_device, fb, nullptr);
-		if (vk_2d_pipeline)
-			vkDestroyPipeline(vk_device, vk_2d_pipeline, nullptr);
-		if (vk_3d_pipeline)
-			vkDestroyPipeline(vk_device, vk_3d_pipeline, nullptr);
-		if (vk_3d_pipeline_additive_a)
-			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_a, nullptr);
-		if (vk_3d_pipeline_additive_c)
-			vkDestroyPipeline(vk_device, vk_3d_pipeline_additive_c, nullptr);
-		if (vk_3d_line_pipeline)
-			vkDestroyPipeline(vk_device, vk_3d_line_pipeline, nullptr);
+		vks_destroy_pipelines();
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 		vk_swapchain = VK_NULL_HANDLE;
 		for (auto &view : vk_swapchain_image_views)
