@@ -33,7 +33,20 @@
 #include "texmap.h"
 #include "common/3d/globvars.h"
 #include "segment.h"
+#include "textures.h"
+#include "texmerge.h"
+#include "effects.h"
+#include "weapon.h"
+#include "powerup.h"
+#include "laser.h"
+#include "player.h"
+#include "robot.h"
+#include "object.h"
+#include "polyobj.h"
+#include "piggy.h"
+#include "d_levelstate.h"
 #include "d_zip.h"
+#include "partial_range.h"
 
 #include <SDL.h>
 #include <cstring>
@@ -852,13 +865,196 @@ void draw_tmap_flat(grs_canvas &, const grs_bitmap &, std::span<const g3_draw_tm
 
 } /* namespace dcx */
 
+/* Texture precaching at level start, a port of ogl_cache_level_textures:
+ * upload walls (stepping animated effects through every frame so texmerged
+ * and animated sides are covered), powerups, weapons, polymodels and the
+ * player's effects up front rather than on first sight mid-frame. */
+namespace dsx {
+
+void vks_cache_polymodel_textures(const polygon_model_index model_num)
+{
+	auto &Polygon_models = LevelSharedPolygonModelState.Polygon_models;
+	if (model_num == polygon_model_index::None)
+		return;
+	const auto &po = Polygon_models[model_num];
+	unsigned i = po.first_texture;
+	const unsigned last_texture = i + po.n_textures;
+	for (; i != last_texture; ++i)
+	{
+		const auto objbitmap = ObjBitmaps[ObjBitmapPtrs[i]];
+		PIGGY_PAGE_IN(objbitmap);
+		vks_get_bmtexture(GameBitmaps[objbitmap]);
+	}
+}
+
+}
+
+namespace {
+
+static void vks_cache_vclip_textures(const vclip &vc)
+{
+	for (const auto i : partial_const_range(vc.frames, vc.num_frames))
+	{
+		PIGGY_PAGE_IN(i);
+		vks_get_bmtexture(GameBitmaps[i]);
+	}
+}
+
+static void vks_cache_vclipn_textures(const d_vclip_array &Vclip, const vclip_index i)
+{
+	if (Vclip.valid_index(i))
+		vks_cache_vclip_textures(Vclip[i]);
+}
+
+static void vks_cache_weapon_textures(const d_vclip_array &Vclip, const weapon_info_array &Weapon_info, const weapon_id_type weapon_type)
+{
+	if (weapon_type >= Weapon_info.size())
+		return;
+	const auto &w = Weapon_info[weapon_type];
+	vks_cache_vclipn_textures(Vclip, w.flash_vclip);
+	vks_cache_vclipn_textures(Vclip, w.robot_hit_vclip);
+	vks_cache_vclipn_textures(Vclip, w.wall_hit_vclip);
+	if (w.render == weapon_info::render_type::vclip)
+		vks_cache_vclipn_textures(Vclip, w.weapon_vclip);
+	else if (w.render == weapon_info::render_type::polymodel)
+	{
+		vks_cache_polymodel_textures(w.model_num);
+		vks_cache_polymodel_textures(w.model_num_inner);
+	}
+}
+
+}
+
 namespace dsx {
 
 void vks_cache_level_textures()
 {
-	/* Placeholder: cache level textures for Vulkan */
+	auto &Effects = LevelUniqueEffectsClipState.Effects;
+	auto &Objects = LevelUniqueObjectState.Objects;
+	auto &vcobjptridx = Objects.vcptridx;
+	int max_efx{0};
+
+	for (auto &ec : partial_const_range(Effects, Num_effects))
+	{
+		vks_cache_vclipn_textures(Vclip, ec.dest_vclip);
+		if (ec.changing_wall_texture == texture_index{UINT16_MAX} && ec.changing_object_texture.dsx == object_bitmap_index::None)
+			continue;
+		if (ec.vc.num_frames > max_efx)
+			max_efx = ec.vc.num_frames;
+	}
+	for (int ef = 0; ef < max_efx; ef++)
+	{
+		for (eclip &ec : partial_range(Effects, Num_effects))
+		{
+			if (ec.changing_wall_texture == texture_index{UINT16_MAX} && ec.changing_object_texture.dsx == object_bitmap_index::None)
+				continue;
+			ec.time_left = -1;
+		}
+		do_special_effects();
+
+		for (const unique_segment &seg : vcsegptr)
+		{
+			for (auto &side : seg.sides)
+			{
+				const auto tmap1 = side.tmap_num;
+				const auto tmap2 = side.tmap_num2;
+				const auto tmap1idx = get_texture_index(tmap1);
+				if (tmap1idx >= NumTextures || tmap1idx >= Textures.size()) [[unlikely]]
+					continue;
+				const auto texture1{Textures[tmap1idx]};
+				if (!GameBitmaps.valid_index(texture1)) [[unlikely]]
+					continue;
+				PIGGY_PAGE_IN(texture1);
+				grs_bitmap *bm = &GameBitmaps[texture1];
+				if (tmap2 != texture2_value::None)
+				{
+					const auto tmap2idx{get_texture_index(tmap2)};
+					if (tmap2idx >= Textures.size()) [[unlikely]]
+						continue;
+					const auto texture2{Textures[tmap2idx]};
+					if (!GameBitmaps.valid_index(texture2))
+						continue;
+					PIGGY_PAGE_IN(texture2);
+					auto &bm2 = GameBitmaps[texture2];
+					/* Mirrors render_face: super-transparent overlays are
+					 * texmerged, others drawn as a second pass. */
+					if (bm2.get_flag_mask(BM_FLAG_SUPER_TRANSPARENT))
+						bm = &texmerge_get_cached_bitmap(GameBitmaps, Textures, tmap1, tmap2);
+					else
+						vks_get_bmtexture(bm2);
+				}
+				vks_get_bmtexture(*bm);
+			}
+		}
+	}
+	reset_special_effects();
+	init_special_effects();
+	{
+		auto &Robot_info = LevelSharedRobotInfoState.Robot_info;
+		// always have lasers, concs, flares.  Always shows player appearance, and at least concs are always available to disappear.
+		vks_cache_weapon_textures(Vclip, Weapon_info, Primary_weapon_to_weapon_info[primary_weapon_index::laser]);
+		vks_cache_weapon_textures(Vclip, Weapon_info, Secondary_weapon_to_weapon_info[secondary_weapon_index::concussion]);
+		vks_cache_weapon_textures(Vclip, Weapon_info, weapon_id_type::FLARE_ID);
+		vks_cache_vclipn_textures(Vclip, vclip_index::player_appearance);
+		vks_cache_vclipn_textures(Vclip, vclip_index::powerup_disappearance);
+		vks_cache_polymodel_textures(Player_ship->model_num.dsx);
+		vks_cache_vclipn_textures(Vclip, Player_ship->expl_vclip_num);
+
+		for (const auto &&objp : vcobjptridx)
+		{
+			if (objp->type == object_type::OBJ_POWERUP && objp->render_type == render_type::RT_POWERUP)
+			{
+				vks_cache_vclipn_textures(Vclip, objp->rtype.vclip_info.vclip_num);
+				const auto id = get_powerup_id(objp);
+				primary_weapon_index p;
+				secondary_weapon_index s;
+				weapon_id_type w;
+				if (
+					(
+						(
+							(id == powerup_type_t::POW_VULCAN_WEAPON && (p = primary_weapon_index::vulcan, true)) ||
+							(id == powerup_type_t::POW_SPREADFIRE_WEAPON && (p = primary_weapon_index::spreadfire, true)) ||
+							(id == powerup_type_t::POW_PLASMA_WEAPON && (p = primary_weapon_index::plasma, true)) ||
+							(id == powerup_type_t::POW_FUSION_WEAPON && (p = primary_weapon_index::fusion, true))
+						) && (w = Primary_weapon_to_weapon_info[p], true)
+					) ||
+					(
+						(
+							(id == powerup_type_t::POW_PROXIMITY_WEAPON && (s = secondary_weapon_index::proximity, true)) ||
+							((id == powerup_type_t::POW_HOMING_AMMO_1 || id == powerup_type_t::POW_HOMING_AMMO_4) && (s = secondary_weapon_index::homing, true)) ||
+							(id == powerup_type_t::POW_SMARTBOMB_WEAPON && (s = secondary_weapon_index::smart, true)) ||
+							(id == powerup_type_t::POW_MEGA_WEAPON && (s = secondary_weapon_index::mega, true))
+						) && (w = Secondary_weapon_to_weapon_info[s], true)
+					)
+				)
+				{
+					vks_cache_weapon_textures(Vclip, Weapon_info, w);
+				}
+			}
+			else if (objp->type != object_type::OBJ_NONE && objp->render_type == render_type::RT_POLYOBJ)
+			{
+				if (objp->type == object_type::OBJ_ROBOT)
+				{
+					auto &ri = Robot_info[get_robot_id(objp)];
+					vks_cache_vclipn_textures(Vclip, ri.exp1_vclip_num);
+					vks_cache_vclipn_textures(Vclip, ri.exp2_vclip_num);
+					vks_cache_weapon_textures(Vclip, Weapon_info, ri.weapon_type);
+				}
+				if (const auto tmap_override{objp->rtype.pobj_info.tmap_override}; tmap_override < Textures.size())
+				{
+					const auto t{Textures[tmap_override]};
+					if (!GameBitmaps.valid_index(t)) [[unlikely]]
+						continue;
+					PIGGY_PAGE_IN(t);
+					vks_get_bmtexture(GameBitmaps[t]);
+				}
+				else if (tmap_override == texture_index{UINT16_MAX}) [[likely]]
+					vks_cache_polymodel_textures(objp->rtype.pobj_info.model_num.dsx);
+			}
+		}
+	}
 }
 
-} /* namespace dsx */
+}
 
 #endif /* DXX_USE_VULKAN */

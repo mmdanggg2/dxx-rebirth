@@ -37,6 +37,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 #include "inferno.h"
@@ -2091,6 +2093,8 @@ window_event_result StartNewLevelSub(const d_robot_info_array &Robot_info, const
 
 #if DXX_USE_OGL
 	ogl_cache_level_textures();
+#elif DXX_USE_VULKAN
+	vks_cache_level_textures();
 #endif
 
 

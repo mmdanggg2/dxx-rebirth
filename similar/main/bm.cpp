@@ -781,6 +781,9 @@ int load_exit_models()
 #if DXX_USE_OGL
 		ogl_cache_polymodel_textures(exit_modelnum);
 		ogl_cache_polymodel_textures(destroyed_exit_modelnum);
+#elif DXX_USE_VULKAN
+		vks_cache_polymodel_textures(exit_modelnum);
+		vks_cache_polymodel_textures(destroyed_exit_modelnum);
 #endif
 	}
 	else if ((exit_hamfile = PHYSFSX_openReadBuffered_updateCase(descent_pig_basename).first))

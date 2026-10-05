@@ -252,6 +252,8 @@ void polygon_model_data_read(polymodel *pm, PHYSFS_File *fp);	// Neutral endian:
 polygon_model_index build_polygon_model_index_from_untrusted(unsigned i);
 #if DXX_USE_OGL
 void ogl_cache_polymodel_textures(polygon_model_index model_num);
+#elif DXX_USE_VULKAN
+void vks_cache_polymodel_textures(polygon_model_index model_num);
 #endif
 }
 #endif
