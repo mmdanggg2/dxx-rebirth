@@ -41,7 +41,8 @@ extern std::vector<VkImageView> vk_swapchain_image_views;
 extern std::vector<VkImage> vk_swapchain_images;
 
 extern uint32_t vk_graphics_queue_family;
-extern uint32_t vk_surface_family;
+/* maxSamplerAnisotropy when the samplerAnisotropy feature is enabled, else 0. */
+extern float vk_max_sampler_anisotropy;
 extern VkExtent2D vk_surface_extent;
 extern VkFormat vk_swapchain_format;
 extern VkFormat vk_depth_format;

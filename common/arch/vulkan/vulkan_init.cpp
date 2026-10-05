@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <optional>
 #include <set>
 #include <span>
 #include <vector>
@@ -41,7 +42,7 @@ std::vector<VkImageView> vk_swapchain_image_views;
 std::vector<VkImage> vk_swapchain_images;
 
 uint32_t vk_graphics_queue_family;
-uint32_t vk_surface_family;
+float vk_max_sampler_anisotropy;
 VkExtent2D vk_surface_extent;
 VkSampleCountFlagBits vk_msaa_samples = VK_SAMPLE_COUNT_1_BIT;
 VkFormat vk_swapchain_format;
@@ -125,6 +126,40 @@ static void DestroyDebugUtilsMessengerEXT(VkInstance instance,
 		func(instance, debugMessenger, pAllocator);
 }
 
+static bool device_supports_extensions(const VkPhysicalDevice device)
+{
+	uint32_t count = 0;
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+	std::vector<VkExtensionProperties> available(count);
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data());
+	return std::ranges::all_of(deviceExtensions, [&](const char *const name) {
+		return std::ranges::any_of(available, [name](const VkExtensionProperties &e) {
+			return std::strcmp(e.extensionName, name) == 0;
+		});
+	});
+}
+
+/* The queue family used for both rendering and presentation: vk_graphics_queue
+ * submits and presents, so one family must support both. */
+static std::optional<uint32_t> find_graphics_present_family(const VkPhysicalDevice device)
+{
+	uint32_t queueFamilyCount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+	std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+	for (uint32_t i = 0; i < queueFamilyCount; i++) {
+		if (!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+			continue;
+		VkBool32 presentSupport = VK_FALSE;
+		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, vk_surface, &presentSupport);
+		if (presentSupport)
+			return i;
+	}
+	return std::nullopt;
+}
+
+/* Pick the most capable usable device: discrete over integrated over
+ * anything else (virtual/CPU), rather than whichever enumerates first. */
 static void pickPhysicalDevice()
 {
 	uint32_t deviceCount = 0;
@@ -135,50 +170,36 @@ static void pickPhysicalDevice()
 	std::vector<VkPhysicalDevice> devices(deviceCount);
 	vkEnumeratePhysicalDevices(vk_instance, &deviceCount, devices.data());
 
+	const auto score = [](const VkPhysicalDeviceType type) {
+		switch (type)
+		{
+			case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+				return 3;
+			case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+				return 2;
+			default:
+				return 1;
+		}
+	};
+	int best_score = 0;
 	for (const auto &device : devices) {
+		if (!device_supports_extensions(device))
+			continue;
+		const auto family = find_graphics_present_family(device);
+		if (!family)
+			continue;
 		VkPhysicalDeviceProperties props{};
 		vkGetPhysicalDeviceProperties(device, &props);
-
-		/* Prefer discrete or integrated GPUs */
-		if (props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
-			props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+		const int s = score(props.deviceType);
+		if (s <= best_score)
 			continue;
-
-		uint32_t queueFamilyCount = 0;
-		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
-		if (queueFamilyCount == 0)
-			continue;
-
-		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
-
-		bool foundGraphics = false;
-		bool foundPresent = false;
-		uint32_t graphicsFamily = 0;
-		uint32_t presentFamily = 0;
-
-		for (uint32_t i = 0; i < queueFamilyCount; i++) {
-			if (!foundGraphics && (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-				graphicsFamily = i;
-				foundGraphics = true;
-			}
-			VkBool32 presentSupport = VK_FALSE;
-			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, vk_surface, &presentSupport);
-			if (presentSupport) {
-				presentFamily = i;
-				foundPresent = true;
-			}
-		}
-
-		if (foundGraphics && foundPresent) {
-			vk_physical_device = device;
-			vk_graphics_queue_family = graphicsFamily;
-			vk_surface_family = presentFamily;
-			return;
-		}
+		best_score = s;
+		vk_physical_device = device;
+		vk_graphics_queue_family = *family;
+		con_printf(CON_DEBUG, "Vulkan: candidate device \"%s\" (type %d)", props.deviceName, static_cast<int>(props.deviceType));
 	}
-
-	Error("Vulkan: Could not find a suitable physical device");
+	if (!best_score)
+		Error("Vulkan: Could not find a suitable physical device");
 }
 
 static void createDevice()
@@ -190,8 +211,19 @@ static void createDevice()
 	queueCreateInfo.queueCount = 1;
 	queueCreateInfo.pQueuePriorities = &queuePriority;
 
+	/* Enable anisotropic filtering only where the device offers it. */
+	VkPhysicalDeviceFeatures supported{};
+	vkGetPhysicalDeviceFeatures(vk_physical_device, &supported);
 	VkPhysicalDeviceFeatures deviceFeatures{};
-	deviceFeatures.samplerAnisotropy = VK_TRUE;
+	deviceFeatures.samplerAnisotropy = supported.samplerAnisotropy;
+	if (supported.samplerAnisotropy)
+	{
+		VkPhysicalDeviceProperties props{};
+		vkGetPhysicalDeviceProperties(vk_physical_device, &props);
+		vk_max_sampler_anisotropy = props.limits.maxSamplerAnisotropy;
+	}
+	else
+		vk_max_sampler_anisotropy = 0;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -208,19 +240,6 @@ static void createDevice()
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create device");;
 
 	vkGetDeviceQueue(vk_device, vk_graphics_queue_family, 0, &vk_graphics_queue);
-}
-
-[[maybe_unused]] static VkShaderModule compileShaderModule(const std::vector<char> &code)
-{
-	VkShaderModuleCreateInfo createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	createInfo.codeSize = code.size();
-	createInfo.pCode = reinterpret_cast<const uint32_t *>(code.data());
-
-	VkShaderModule shaderModule;
-	VkResult result = vkCreateShaderModule(vk_device, &createInfo, nullptr, &shaderModule);
-	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create shader module");;
-	return shaderModule;
 }
 
 /* Per-frame vertex buffers: one per frame-in-flight, host-visible and
