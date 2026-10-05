@@ -69,6 +69,9 @@ void vks_freebmtexture(grs_bitmap &bm);
 /* Destroy textures released before frame slot `frame` was last submitted
  * (call at frame begin, after that slot's fence wait). */
 void vks_flush_pending_texture_frees(uint32_t frame);
+/* End the current frame slot's recorded texture uploads and return their
+ * command buffer (VK_NULL_HANDLE if none), to submit ahead of the frame. */
+VkCommandBuffer vks_end_pending_uploads();
 
 /* Destroy all Vulkan resources (called during shutdown) */
 void vks_shutdown_textures();

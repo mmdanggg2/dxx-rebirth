@@ -1602,14 +1602,19 @@ void vks_present_frame()
 		Error("Vulkan: Failed to end command buffer");
 	vk_frame_recording = false;
 
+	/* Texture uploads recorded for this frame slot run first in the same
+	 * batch; their barriers make the images readable by the frame. */
+	const std::array<VkCommandBuffer, 2> cmds{{vks_end_pending_uploads(), cmd}};
+	const bool has_uploads = cmds[0] != VK_NULL_HANDLE;
+
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	submitInfo.waitSemaphoreCount = 1;
 	submitInfo.pWaitSemaphores = &vk_image_available_semaphores[vk_current_frame];
 	submitInfo.pWaitDstStageMask = &waitStage;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmd;
+	submitInfo.commandBufferCount = has_uploads ? 2 : 1;
+	submitInfo.pCommandBuffers = has_uploads ? cmds.data() : &cmds[1];
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &vk_present_semaphores[vk_image_index];
 

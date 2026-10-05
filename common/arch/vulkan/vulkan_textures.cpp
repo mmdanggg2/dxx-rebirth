@@ -64,6 +64,8 @@ static void vks_destroy_texture(vks_texture &tex)
 		free_textures.push_back(static_cast<uint32_t>(&tex - texture_pool.data()));
 }
 
+static void vks_submit_pending_uploads();
+
 /* Destroy pending textures from every slot whose frames have been submitted.
  * The open frame's slot is kept while it records: its command buffer is not
  * submitted yet, so a device idle does not cover it. */
@@ -75,6 +77,10 @@ static bool vks_reclaim_pending_textures()
 			any = true;
 	if (!any)
 		return false;
+	/* Uploads recorded outside a frame may reference the textures about to be
+	 * destroyed; while a frame records, they belong to the skipped slot. */
+	if (!vks_is_frame_recording())
+		vks_submit_pending_uploads();
 	vkDeviceWaitIdle(vk_device);
 	for (uint32_t i = 0; i != VKS_PENDING_SLOTS; ++i)
 	{
@@ -246,54 +252,181 @@ static vks_texture *vks_create_texture(const uint32_t w, const uint32_t h)
 	return nullptr;
 }
 
-/* Allocate and begin a one-time-submit command buffer for transfer work
- * (staging uploads, layout transitions). vk_command_pools[0] is created in
- * gr_set_mode, which always runs before any texture is loaded. */
-static VkCommandBuffer begin_one_time_commands()
+/* Texture uploads are recorded into a per-frame-slot transfer command buffer
+ * and submitted together with that slot's frame (ahead of the frame's own
+ * command buffer), instead of a submit + vkQueueWaitIdle per texture. Staging
+ * data is sub-allocated from per-slot host-visible chunks, recycled once the
+ * slot's fence shows the frame has completed. The command pool is separate
+ * from the frame pools, which are rebuilt with the swapchain. */
+struct vks_staging_chunk
 {
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = vk_command_pools[0];
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = 1;
+	VkBuffer buffer{};
+	VkDeviceMemory memory{};
+	uint8_t *mapped{};
+	VkDeviceSize size{};
+	VkDeviceSize used{};
+};
 
-	VkCommandBuffer cmd;
-	vkAllocateCommandBuffers(vk_device, &allocInfo, &cmd);
+struct vks_upload_slot
+{
+	VkCommandBuffer cmd{};
+	bool recording{};
+	std::vector<vks_staging_chunk> chunks;
+};
 
+static VkCommandPool vk_upload_pool;
+static std::array<vks_upload_slot, VKS_PENDING_SLOTS> upload_slots;
+constexpr VkDeviceSize VKS_STAGING_CHUNK_SIZE = 8 << 20;
+
+/* Find a host-visible, host-coherent memory type satisfying `requirements'. */
+static uint32_t find_host_visible_memory_type(VkMemoryRequirements requirements)
+{
+	VkPhysicalDeviceMemoryProperties memProperties;
+	vkGetPhysicalDeviceMemoryProperties(vk_physical_device, &memProperties);
+	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+		if ((requirements.memoryTypeBits & (1u << i)) &&
+			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+			return i;
+	}
+	Error("Vulkan: No suitable host-visible memory type for staging buffer");
+}
+
+static vks_staging_chunk create_staging_chunk(const VkDeviceSize size)
+{
+	vks_staging_chunk chunk;
+	chunk.size = size;
+
+	VkBufferCreateInfo bufferInfo{};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = size;
+	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &chunk.buffer);
+	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to create staging buffer");
+
+	VkMemoryRequirements memReqs;
+	vkGetBufferMemoryRequirements(vk_device, chunk.buffer, &memReqs);
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReqs.size;
+	allocInfo.memoryTypeIndex = find_host_visible_memory_type(memReqs);
+	result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &chunk.memory);
+	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to allocate staging memory");
+	result = vkBindBufferMemory(vk_device, chunk.buffer, chunk.memory, 0);
+	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to bind staging memory");
+	void *data;
+	result = vkMapMemory(vk_device, chunk.memory, 0, size, 0, &data);
+	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to map staging memory");
+	chunk.mapped = static_cast<uint8_t *>(data);
+	return chunk;
+}
+
+static void destroy_staging_chunk(vks_staging_chunk &chunk)
+{
+	vkUnmapMemory(vk_device, chunk.memory);
+	vkDestroyBuffer(vk_device, chunk.buffer, nullptr);
+	vkFreeMemory(vk_device, chunk.memory, nullptr);
+	chunk = {};
+}
+
+/* The upload command buffer of the current frame slot, begun on first use.
+ * Beginning it reuses the slot's command buffer and staging, so the slot's
+ * previous submission must have completed: vks_begin_frame already waited on
+ * the slot's fence when a frame is recording; otherwise wait here. */
+static vks_upload_slot &vks_begin_uploads()
+{
+	const auto frame = vk_current_frame % VKS_PENDING_SLOTS;
+	auto &slot = upload_slots[frame];
+	if (slot.recording)
+		return slot;
+	if (!vk_upload_pool)
+	{
+		VkCommandPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolInfo.queueFamilyIndex = vk_graphics_queue_family;
+		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		if (vkCreateCommandPool(vk_device, &poolInfo, nullptr, &vk_upload_pool) != VK_SUCCESS)
+			Error("Vulkan: Failed to create upload command pool");
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = vk_upload_pool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+		for (auto &s : upload_slots)
+			if (vkAllocateCommandBuffers(vk_device, &allocInfo, &s.cmd) != VK_SUCCESS)
+				Error("Vulkan: Failed to allocate upload command buffer");
+	}
+	if (!vks_is_frame_recording() && frame < vk_in_flight_fences.size())
+		vkWaitForFences(vk_device, 1, &vk_in_flight_fences[frame], VK_TRUE, UINT64_MAX);
+	/* Keep the first chunk for reuse; release overflow chunks. */
+	while (slot.chunks.size() > 1)
+	{
+		destroy_staging_chunk(slot.chunks.back());
+		slot.chunks.pop_back();
+	}
+	if (!slot.chunks.empty())
+		slot.chunks.front().used = 0;
+	vkResetCommandBuffer(slot.cmd, 0);
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cmd, &beginInfo);
-	return cmd;
+	vkBeginCommandBuffer(slot.cmd, &beginInfo);
+	slot.recording = true;
+	return slot;
 }
 
-static void submit_one_time_commands(VkCommandBuffer cmd)
+VkCommandBuffer vks_end_pending_uploads()
 {
-	vkEndCommandBuffer(cmd);
+	auto &slot = upload_slots[vk_current_frame % VKS_PENDING_SLOTS];
+	if (!slot.recording)
+		return VK_NULL_HANDLE;
+	vkEndCommandBuffer(slot.cmd);
+	slot.recording = false;
+	return slot.cmd;
+}
 
+/* Submit recorded uploads on their own and wait for them, for paths that
+ * must destroy resources those uploads reference before the next frame
+ * would have submitted them. */
+static void vks_submit_pending_uploads()
+{
+	const VkCommandBuffer cmd = vks_end_pending_uploads();
+	if (!cmd)
+		return;
 	VkSubmitInfo submitInfo{};
 	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &cmd;
-
-	vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, VK_NULL_HANDLE);
+	if (vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS)
+		Error("Vulkan: Failed to submit texture uploads");
 	vkQueueWaitIdle(vk_graphics_queue);
-
-	vkFreeCommandBuffers(vk_device, vk_command_pools[0], 1, &cmd);
 }
 
-static void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
+/* Record an upload of `rgba` (`w`x`h` RGBA8 texels) into `image`, with the
+ * layout transitions to make it sampleable by the frame that follows. */
+static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, const uint32_t w, const uint32_t h)
 {
-	VkCommandBuffer cmd = begin_one_time_commands();
+	auto &slot = vks_begin_uploads();
+	const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * 4;
+	/* Texel-aligned (and comfortably above optimalBufferCopyOffsetAlignment)
+	 * sub-allocation from the slot's staging chunks. */
+	constexpr VkDeviceSize alignment = 16;
+	if (slot.chunks.empty() || ((slot.chunks.back().used + alignment - 1) & ~(alignment - 1)) + imageSize > slot.chunks.back().size)
+		slot.chunks.emplace_back(create_staging_chunk(std::max(VKS_STAGING_CHUNK_SIZE, imageSize)));
+	auto &chunk = slot.chunks.back();
+	const VkDeviceSize offset = (chunk.used + alignment - 1) & ~(alignment - 1);
+	std::memcpy(chunk.mapped + offset, rgba, imageSize);
+	chunk.used = offset + imageSize;
 
 	VkBufferImageCopy region{};
-	region.bufferOffset = 0;
+	region.bufferOffset = offset;
 	region.bufferRowLength = 0;
 	region.bufferImageHeight = 0;
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	region.imageSubresource.layerCount = 1;
-	region.imageExtent.width = width;
-	region.imageExtent.height = height;
+	region.imageExtent.width = w;
+	region.imageExtent.height = h;
 	region.imageExtent.depth = 1;
 
 	VkImageMemoryBarrier barrier{};
@@ -310,11 +443,11 @@ static void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, ui
 	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	barrier.srcAccessMask = 0;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	vkCmdPipelineBarrier(cmd,
+	vkCmdPipelineBarrier(slot.cmd,
 		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-	vkCmdCopyBufferToImage(cmd, buffer, image,
+	vkCmdCopyBufferToImage(slot.cmd, chunk.buffer, image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
 	/* TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL */
@@ -322,69 +455,9 @@ static void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, ui
 	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	vkCmdPipelineBarrier(cmd,
+	vkCmdPipelineBarrier(slot.cmd,
 		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 		0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-	submit_one_time_commands(cmd);
-}
-
-/* Find a host-visible, host-coherent memory type satisfying `requirements'. */
-static uint32_t find_host_visible_memory_type(VkMemoryRequirements requirements)
-{
-	VkPhysicalDeviceMemoryProperties memProperties;
-	vkGetPhysicalDeviceMemoryProperties(vk_physical_device, &memProperties);
-	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-		if ((requirements.memoryTypeBits & (1u << i)) &&
-			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
-			(memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
-			return i;
-	}
-	Error("Vulkan: No suitable host-visible memory type for staging buffer");
-}
-
-/* Upload `rgba` (`w`x`h` RGBA8 texels) into `image` through a host-visible
- * staging buffer. */
-static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, const uint32_t w, const uint32_t h)
-{
-	const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * 4;
-
-	VkBufferCreateInfo bufferInfo{};
-	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	bufferInfo.size = imageSize;
-	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-	VkBuffer stagingBuffer;
-	VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &stagingBuffer);
-	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to create staging buffer");
-
-	VkMemoryRequirements memReqs;
-	vkGetBufferMemoryRequirements(vk_device, stagingBuffer, &memReqs);
-
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = find_host_visible_memory_type(memReqs);
-
-	VkDeviceMemory stagingMemory;
-	result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &stagingMemory);
-	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to allocate staging memory");
-
-	result = vkBindBufferMemory(vk_device, stagingBuffer, stagingMemory, 0);
-	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to bind staging memory");
-
-	void *data;
-	result = vkMapMemory(vk_device, stagingMemory, 0, imageSize, 0, &data);
-	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to map staging memory");
-	std::memcpy(data, rgba, imageSize);
-	vkUnmapMemory(vk_device, stagingMemory);
-
-	copyBufferToImage(stagingBuffer, image, w, h);
-
-	/* Staging resources are no longer needed once the upload completed. */
-	vkDestroyBuffer(vk_device, stagingBuffer, nullptr);
-	vkFreeMemory(vk_device, stagingMemory, nullptr);
 }
 
 /* Expand `w`x`h` paletted pixels (row stride `rowsize`) into RGBA via `pal`
@@ -528,7 +601,9 @@ void vks_flush_pending_texture_frees(uint32_t frame)
 	if (v.empty())
 		return;
 	/* Textures released while no frame was recording may be referenced by the
-	 * other slot's frame, which this slot's fence does not cover. */
+	 * other slot's frame, which this slot's fence does not cover, or by
+	 * uploads recorded since, which no frame has submitted yet. */
+	vks_submit_pending_uploads();
 	vkDeviceWaitIdle(vk_device);
 	for (auto *tex : v)
 		vks_destroy_texture(*tex);
@@ -551,6 +626,17 @@ void vks_shutdown_textures()
 	{
 		vkDestroySampler(vk_device, vk_texture_sampler, nullptr);
 		vk_texture_sampler = VK_NULL_HANDLE;
+	}
+	for (auto &slot : upload_slots)
+	{
+		for (auto &chunk : slot.chunks)
+			destroy_staging_chunk(chunk);
+		slot = {};
+	}
+	if (vk_upload_pool)
+	{
+		vkDestroyCommandPool(vk_device, vk_upload_pool, nullptr);
+		vk_upload_pool = VK_NULL_HANDLE;
 	}
 }
 
