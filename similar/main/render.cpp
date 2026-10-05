@@ -58,6 +58,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "playsave.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "args.h"
 
@@ -269,7 +271,7 @@ static void render_face(grs_canvas &canvas, const shared_segment &segp, const si
 	}
 #endif
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	grs_bitmap *bm2 = nullptr;
 	if (!CGameArg.DbgUseOldTextureMerge)
 	{
@@ -382,7 +384,7 @@ static void render_face(grs_canvas &canvas, const shared_segment &segp, const si
 	else
 #endif
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 		if (bm2){
 			g3_draw_tmap_2(canvas, nv, pointlist, uvl_copy, dyn_light, *bm, *bm2, get_texture_rotation_low(tmap2), draw_tmap);
 		}else

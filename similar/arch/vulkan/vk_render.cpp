@@ -32,6 +32,8 @@
 #include "3d.h"
 #include "texmap.h"
 #include "common/3d/globvars.h"
+#include "segment.h"
+#include "d_zip.h"
 
 #include <SDL.h>
 #include <cstring>
@@ -671,6 +673,41 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 		vt.a = alpha;
 	}
 	vks_emit_3d(ds, verts.data(), static_cast<uint32_t>(nv));
+}
+
+/* Wall with an overlay texture (tmap_num2): draw the base, then the overlay
+ * over the same polygon with its texture coordinates rotated by `orient`, as
+ * the OpenGL _g3_draw_tmap_2 does. The overlay pass has the same depth, so
+ * the LESS_OR_EQUAL depth test lets it through; transparent overlay texels
+ * are discarded. */
+void _g3_draw_tmap_2(grs_canvas &canvas, const std::span<g3_draw_tmap_point *const> pointlist, const std::span<const g3s_uvl, 4> uvl_list, const std::span<const g3s_lrgb, 4> light_rgb, grs_bitmap &bmbot, grs_bitmap &bm, const texture2_rotation_low orient, const tmap_drawer_type tmap_drawer_ptr)
+{
+	_g3_draw_tmap(canvas, pointlist, uvl_list.data(), light_rgb.data(), bmbot, tmap_drawer_ptr);
+	std::array<g3s_uvl, 4> rotated;
+	for (auto &&[r, uvl] : zip(rotated, uvl_list))
+	{
+		r.l = uvl.l;
+		switch (orient)
+		{
+			case texture2_rotation_low::_1:
+				r.u = F1_0 - uvl.v;
+				r.v = uvl.u;
+				break;
+			case texture2_rotation_low::_2:
+				r.u = F1_0 - uvl.u;
+				r.v = F1_0 - uvl.v;
+				break;
+			case texture2_rotation_low::_3:
+				r.u = uvl.v;
+				r.v = F1_0 - uvl.u;
+				break;
+			default:
+				r.u = uvl.u;
+				r.v = uvl.v;
+				break;
+		}
+	}
+	_g3_draw_tmap(canvas, pointlist, rotated.data(), light_rgb.data(), bm, draw_tmap);
 }
 
 void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint8_t color)

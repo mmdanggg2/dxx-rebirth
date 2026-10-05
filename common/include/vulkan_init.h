@@ -197,7 +197,7 @@ bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned 
 void vks_upixelc(const grs_bitmap &, unsigned x, unsigned y, color_palette_index c);
 color_palette_index vks_ugpixel(const grs_bitmap &bitmap, unsigned x, unsigned y);
 void vks_ulinec(grs_canvas &, int left, int top, int right, int bot, int c);
-
+void _g3_draw_tmap_2(grs_canvas &, std::span<g3_draw_tmap_point *const> pointlist, std::span<const g3s_uvl, 4> uvl_list, std::span<const g3s_lrgb, 4> light_rgb, grs_bitmap &bmbot, grs_bitmap &bm, texture2_rotation_low orient, tmap_drawer_type tmap_drawer_ptr);
 
 /* UI elements */
 void vks_draw_vertex_reticle(grs_canvas &, int cross, int primary, int secondary, int color, int alpha, int size_offs);
@@ -207,6 +207,19 @@ void vks_internal_string(grs_canvas &, const grs_font &cv_font, int entry_x, int
 /* vks_init_font is file-local in font.cpp (called from gr_init_font). */
 
 } /* namespace dcx */
+
+template <std::size_t N>
+static inline void g3_draw_tmap_2(grs_canvas &canvas, const unsigned nv, const std::array<g3_draw_tmap_point *, N> &pointlist, const std::array<g3s_uvl, N> &uvl_list, const std::array<g3s_lrgb, N> &light_rgb, grs_bitmap &bmbot, grs_bitmap &bm, const texture2_rotation_low orient, const tmap_drawer_type tmap_drawer_ptr)
+{
+	static_assert(N <= MAX_POINTS_PER_POLY, "too many points in tmap");
+#ifdef DXX_CONSTANT_TRUE
+	if (DXX_CONSTANT_TRUE(nv > N))
+		DXX_ALWAYS_ERROR_FUNCTION("reading beyond array");
+#endif
+	if (nv > N)
+		return;
+	_g3_draw_tmap_2(canvas, std::span(pointlist).first(nv), uvl_list, light_rgb, bmbot, bm, orient, tmap_drawer_ptr);
+}
 
 #ifdef DXX_BUILD_DESCENT
 namespace dsx {

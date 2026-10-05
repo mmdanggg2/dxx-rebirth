@@ -112,6 +112,7 @@ struct CArg : prohibit_void_ptr<>
 #endif
 	unsigned OglSyncWait;
 #else
+	static constexpr std::false_type DbgUseOldTextureMerge{};
 	bool DbgSdlHWSurface;
 	bool DbgSdlASyncBlit;
 #endif
