@@ -10,7 +10,6 @@
 
 #include "vulkan_init.h"
 #include "vulkan_textures.h"
-#include "vulkan_sync.h"
 #include "gr.h"
 #include "game.h"
 #include "config.h"
@@ -45,9 +44,6 @@ namespace dcx {
 
 /* Vulkan global state — populated by vk_init.cpp */
 SDL_Window *g_pRebirthVulkanWindow = nullptr;
-
-/* Sync helper */
-extern vks_sync vulkan_sync_helper;
 
 /* Fullscreen tracking */
 static int gr_installed = 0;
@@ -170,9 +166,6 @@ int gr_init()
 	/* Descriptor pool — persists across resize (textures outlive swapchain) */
 	vks_init_descriptor_pool();
 
-	/* Set up sync helper */
-	vulkan_sync_helper.init();
-
 	grd_curscreen = std::make_unique<grs_screen>();
 	*grd_curscreen = {};
 	grd_curscreen->sc_canvas.cv_bitmap.bm_data = NULL;
@@ -243,7 +236,6 @@ void gr_close()
 
 	if (vulkan_initialized)
 	{
-		vulkan_sync_helper.deinit();
 		vks_shutdown_textures();
 		vks_shutdown();
 	}

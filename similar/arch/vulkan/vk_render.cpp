@@ -10,7 +10,6 @@
 
 #include "vulkan_init.h"
 #include "vulkan_textures.h"
-#include "vulkan_sync.h"
 #include "gr.h"
 #include "game.h"
 #include "config.h"
@@ -46,8 +45,6 @@ namespace dcx {
 
 using std::min;
 using std::max;
-
-extern vks_sync vulkan_sync_helper;
 
 /* Screen dimensions */
 unsigned last_width = 640;

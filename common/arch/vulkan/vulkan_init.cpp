@@ -10,7 +10,6 @@
 
 #include "vulkan_init.h"
 #include "vulkan_textures.h"
-#include "vulkan_sync.h"
 #include "vulkan/shaders/generated.h"
 #include "window.h"
 #include "error.h"
@@ -616,55 +615,85 @@ void vks_init_surface(SDL_Window *window_handle)
 
 void vks_init_swapchain(uint32_t width, uint32_t height)
 {
-	vk_surface_extent = {width, height};
+	VkSurfaceCapabilitiesKHR caps{};
+	vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_physical_device, vk_surface, &caps);
+	/* The surface dictates the extent when currentExtent is defined (X11,
+	 * Windows); otherwise (Wayland) the requested size is clamped to the
+	 * supported range. */
+	if (caps.currentExtent.width != UINT32_MAX)
+		vk_surface_extent = caps.currentExtent;
+	else
+		vk_surface_extent = {
+			std::clamp(width, caps.minImageExtent.width, caps.maxImageExtent.width),
+			std::clamp(height, caps.minImageExtent.height, caps.maxImageExtent.height),
+		};
 
-	/* Find supported swapchain format */
+	/* Find supported swapchain format. Prefer UNORM: the palette colours
+	 * are already gamma-encoded, as in OpenGL's default framebuffer, so an
+	 * sRGB format would encode them twice. */
 	uint32_t formatCount;
 	vkGetPhysicalDeviceSurfaceFormatsKHR(vk_physical_device, vk_surface, &formatCount, nullptr);
 	std::vector<VkSurfaceFormatKHR> formats(formatCount);
 	vkGetPhysicalDeviceSurfaceFormatsKHR(vk_physical_device, vk_surface, &formatCount, formats.data());
 
-	if (formatCount == 1 && formats[0].format == VK_FORMAT_UNDEFINED)
-		vk_swapchain_format = VK_FORMAT_B8G8R8A8_UNORM;
-	else {
-		bool found = false;
-		for (const auto &f : formats) {
-			if (f.format == VK_FORMAT_B8G8R8A8_UNORM) {
-				vk_swapchain_format = f.format;
-				found = true;
-				break;
-			}
-		}
-		if (!found)
-			vk_swapchain_format = formats[0].format;
+	VkSurfaceFormatKHR surfaceFormat{VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
+	if (!(formatCount == 1 && formats[0].format == VK_FORMAT_UNDEFINED))
+	{
+		const auto preferred = std::ranges::find_if(formats, [](const VkSurfaceFormatKHR &f) {
+			return f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+				(f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM);
+		});
+		surfaceFormat = (preferred != formats.end()) ? *preferred : formats[0];
 	}
+	vk_swapchain_format = surfaceFormat.format;
 
-	/* Find present mode */
+	/* Present mode: FIFO (always available) blocks on vertical blank, as
+	 * SDL_GL_SetSwapInterval(1) does for OpenGL. Without VSync, prefer
+	 * MAILBOX (no tearing), then IMMEDIATE. */
 	uint32_t modeCount;
 	vkGetPhysicalDeviceSurfacePresentModesKHR(vk_physical_device, vk_surface, &modeCount, nullptr);
 	std::vector<VkPresentModeKHR> presentModes(modeCount);
 	vkGetPhysicalDeviceSurfacePresentModesKHR(vk_physical_device, vk_surface, &modeCount, presentModes.data());
 
 	VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
-	for (const auto &pm : presentModes) {
-		if (pm == VK_PRESENT_MODE_MAILBOX_KHR) {
-			presentMode = pm;
-			break;
-		}
+	if (!CGameCfg.VSync)
+	{
+		const auto supported = [&](const VkPresentModeKHR pm) {
+			return std::ranges::find(presentModes, pm) != presentModes.end();
+		};
+		if (supported(VK_PRESENT_MODE_MAILBOX_KHR))
+			presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+		else if (supported(VK_PRESENT_MODE_IMMEDIATE_KHR))
+			presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
 	}
+
+	/* Keep the image count above the frames in flight so an image is always
+	 * free to acquire, within the surface's limits (0 = no maximum). */
+	uint32_t imageCount = std::max(caps.minImageCount + 1, VK_MAX_FRAMES_IN_FLIGHT + 1);
+	if (caps.maxImageCount)
+		imageCount = std::min(imageCount, caps.maxImageCount);
+
+	VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	if (!(caps.supportedCompositeAlpha & compositeAlpha))
+		for (const auto a : {VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR})
+			if (caps.supportedCompositeAlpha & a)
+			{
+				compositeAlpha = a;
+				break;
+			}
 
 	VkSwapchainCreateInfoKHR createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 	createInfo.surface = vk_surface;
-	createInfo.minImageCount = 3;
-	createInfo.imageFormat = vk_swapchain_format;
-	createInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	createInfo.minImageCount = imageCount;
+	createInfo.imageFormat = surfaceFormat.format;
+	createInfo.imageColorSpace = surfaceFormat.colorSpace;
 	createInfo.imageExtent = vk_surface_extent;
 	createInfo.imageArrayLayers = 1;
 	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	createInfo.preTransform = caps.currentTransform;
+	createInfo.compositeAlpha = compositeAlpha;
 	createInfo.presentMode = presentMode;
 	createInfo.clipped = VK_TRUE;
 	createInfo.oldSwapchain = VK_NULL_HANDLE;
@@ -841,7 +870,10 @@ void vks_init_render_pass()
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create render pass");;
 }
 
-void vks_init_pipeline()
+/* Pipeline layout and shader modules do not depend on the swapchain: create
+ * them once and keep them across vks_recreate_swapchain (vks_shutdown frees
+ * them). */
+static void vks_init_pipeline_layout_and_shaders()
 {
 	/* --- pipeline layout (shared by 2D and 3D) --- */
 	VkPushConstantRange pushRange{};
@@ -879,6 +911,12 @@ void vks_init_pipeline()
 	finfo.pCode = vulkan::fragment_spv_code();
 	if (vkCreateShaderModule(vk_device, &finfo, nullptr, &vk_fragment_shader) != VK_SUCCESS)
 		Error("Vulkan: Failed to create fragment shader module");
+}
+
+void vks_init_pipeline()
+{
+	if (!vk_2d_pipeline_layout)
+		vks_init_pipeline_layout_and_shaders();
 
 	/* --- state shared by both pipelines --- */
 	VkPipelineViewportStateCreateInfo viewportState{};
@@ -1354,8 +1392,12 @@ static VkExtent2D vks_query_surface_extent()
 
 void vks_recreate_swapchain(uint32_t w, uint32_t h)
 {
+	/* A frame still open (gr_set_mode called between draws and gr_flip) owns
+	 * an acquired image and its semaphores: submit and present it before the
+	 * swapchain and command buffers it references are destroyed. */
+	if (vk_frame_recording)
+		vks_present_frame();
 	if (vk_swapchain) {
-		vulkan_sync_helper.deinit();
 		vkDeviceWaitIdle(vk_device);
 
 		for (auto &fb : vk_framebuffers)
@@ -1372,24 +1414,26 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
 	}
 
-	vk_surface_extent = {w, h};
+	/* vks_init_swapchain settles the real extent from the surface
+	 * capabilities; size everything else from that. */
 	vks_init_swapchain(w, h);
+	const auto extent = vk_surface_extent;
 	vks_init_swapchain_image_views();
 	vks_init_render_pass();
 	initDepthResources();
 	initColorResources();
 	vks_init_command_buffers();
 	vks_init_pipeline();
-	vks_init_framebuffers(w, h);
+	vks_init_framebuffers(extent.width, extent.height);
 	vks_init_sync_objects();
 	vks_destroy_vertex_buffers();
 	vks_init_vertex_buffers();
 	if (vk_white_descriptor_set == VK_NULL_HANDLE)
 		vks_init_white_texture();
 
-	vulkan_sync_helper.init();
-	last_width = w;
-	last_height = h;
+	vk_need_recreate = false;
+	last_width = extent.width;
+	last_height = extent.height;
 }
 
 /* Begin a new frame: recycle the per-frame command buffer, acquire the next
@@ -1410,12 +1454,14 @@ static bool vks_begin_frame()
 		return true;
 
 	/* If the swapchain was reported out of date (by a prior acquire or
-	 * present), rebuild it before attempting to acquire again. */
+	 * present), rebuild it before attempting to acquire again. A minimised
+	 * window can report a 0x0 extent, which cannot back a swapchain: skip
+	 * frames until it has an area again. */
 	if (vk_need_recreate) {
 		const auto ext = vks_query_surface_extent();
+		if (!ext.width || !ext.height)
+			return false;
 		vks_recreate_swapchain(ext.width, ext.height);
-		vk_need_recreate = false;
-		vk_frame_recording = false;
 	}
 
 	/* Wait for this frame slot's previous submission to retire. The fence is
@@ -1548,9 +1594,11 @@ void vks_present_frame()
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &vk_present_semaphores[vk_image_index];
 
+	/* A failed submit (device lost, out of memory) never signals the frame
+	 * fence, so the next wait on this slot would hang: stop here instead. */
 	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, vk_in_flight_fences[vk_current_frame]);
 	if (result != VK_SUCCESS)
-		con_printf(CON_URGENT, "Vulkan: vkQueueSubmit failed: %d", static_cast<int>(result));
+		Error("Vulkan: vkQueueSubmit failed (result=%d)", static_cast<int>(result));
 
 	VkPresentInfoKHR presentInfo{};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1561,14 +1609,11 @@ void vks_present_frame()
 	presentInfo.pImageIndices = &vk_image_index;
 
 	result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-		vk_need_recreate = true;
-		return;
-	}
-	if (result != VK_SUCCESS)
-		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed");
-
 	vk_current_frame = (vk_current_frame + 1) % VK_MAX_FRAMES_IN_FLIGHT;
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+		vk_need_recreate = true;
+	else if (result != VK_SUCCESS)
+		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed (result=%d)", static_cast<int>(result));
 }
 
 void vks_end_frame()

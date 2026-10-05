@@ -5163,7 +5163,6 @@ class DXXArchive(DXXCommon):
 	# for vulkan
 	get_objects_arch_vulkan = DXXCommon.create_lazy_object_getter((
 'common/arch/vulkan/vulkan_init.cpp',
-'common/arch/vulkan/vulkan_sync.cpp',
 'common/arch/vulkan/vulkan_textures.cpp',
 ))
 	get_objects_arch_sdlmixer = DXXCommon.create_lazy_object_getter((
