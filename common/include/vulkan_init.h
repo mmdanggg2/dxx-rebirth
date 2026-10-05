@@ -30,9 +30,6 @@ constexpr int vulkan_bitmap_use_dst_canvas = -1;
 
 namespace dcx {
 
-/* SDL window handle */
-extern SDL_Window *g_pRebirthVulkanWindow;
-
 /* Vulkan renderer state */
 extern VkInstance vk_instance;
 extern VkPhysicalDevice vk_physical_device;

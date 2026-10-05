@@ -42,9 +42,6 @@ int g_iRebirthWindowX = 0, g_iRebirthWindowY = 0;
 
 namespace dcx {
 
-/* Vulkan global state — populated by vk_init.cpp */
-SDL_Window *g_pRebirthVulkanWindow = nullptr;
-
 /* Fullscreen tracking */
 static int gr_installed = 0;
 static int vulkan_initialized = 0;
@@ -94,12 +91,12 @@ static void init_descriptor_set_layout()
 
 int gr_check_fullscreen(void)
 {
-	return !!(SDL_GetWindowFlags(g_pRebirthVulkanWindow) & SDL_WINDOW_FULLSCREEN);
+	return !!(SDL_GetWindowFlags(g_pRebirthSDLMainWindow) & SDL_WINDOW_FULLSCREEN);
 }
 
 void gr_toggle_fullscreen()
 {
-	const auto SDLWindow{g_pRebirthVulkanWindow};
+	const auto SDLWindow{g_pRebirthSDLMainWindow};
 	const bool is_fullscreen = SDL_GetWindowFlags(SDLWindow) & SDL_WINDOW_FULLSCREEN;
 	CGameCfg.WindowMode = is_fullscreen;
 	if (!is_fullscreen)
@@ -117,9 +114,15 @@ void gr_toggle_fullscreen()
 
 namespace dsx {
 
+/* Size the game screen (and so the swapchain) to the window's drawable
+ * area, as the OpenGL backend does with SDL_GL_GetDrawableSize. */
 void gr_set_mode_from_window_size()
 {
-	/* Stub — full implementation requires window resize logic */
+	const auto SDLWindow{g_pRebirthSDLMainWindow};
+	assert(SDLWindow);
+	int w, h;
+	SDL_Vulkan_GetDrawableSize(SDLWindow, &w, &h);
+	gr_set_mode(screen_mode(w, h));
 }
 
 int gr_init()
@@ -128,7 +131,7 @@ int gr_init()
 		return -1;
 
 	/* Create an SDL window for Vulkan surface creation */
-	assert(!g_pRebirthVulkanWindow);
+	assert(!g_pRebirthSDLMainWindow);
 	unsigned sdl_window_flags = SDL_WINDOW_VULKAN;
 	if (CGameArg.SysNoBorders)
 		sdl_window_flags |= SDL_WINDOW_BORDERLESS;
@@ -138,20 +141,21 @@ int gr_init()
 	sdl_window_flags |= SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 	const auto mode{Game_screen_mode};
-	g_pRebirthVulkanWindow = SDL_CreateWindow(DESCENT_VERSION, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SM_W(mode), SM_H(mode), sdl_window_flags);
-	if (!g_pRebirthVulkanWindow) {
+	const auto SDLWindow = SDL_CreateWindow(DESCENT_VERSION, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SM_W(mode), SM_H(mode), sdl_window_flags);
+	if (!SDLWindow) {
 		con_printf(CON_URGENT, "Vulkan: SDL_CreateWindow failed: %s", SDL_GetError());
 		return -1;
 	}
-	SDL_GetWindowPosition(g_pRebirthVulkanWindow, &g_iRebirthWindowX, &g_iRebirthWindowY);
+	SDL_GetWindowPosition(SDLWindow, &g_iRebirthWindowX, &g_iRebirthWindowY);
+	g_pRebirthSDLMainWindow = SDLWindow;
 	if (const auto window_icon = SDL_LoadBMP(DXX_SDL_WINDOW_ICON_BITMAP))
-		SDL_SetWindowIcon(g_pRebirthVulkanWindow, window_icon);
+		SDL_SetWindowIcon(SDLWindow, window_icon);
 
 	/* Initialize Vulkan instance (needs window for platform-specific extensions) */
-	vks_init_instance(g_pRebirthVulkanWindow);
+	vks_init_instance(SDLWindow);
 
 	/* Create surface from SDL window */
-	vks_init_surface(g_pRebirthVulkanWindow);
+	vks_init_surface(SDLWindow);
 
 	/* Initialize physical device */
 	vks_init_physical_device();
@@ -200,6 +204,11 @@ int gr_set_mode(screen_mode mode)
 		grd_curscreen->get_screen_height() * CGameCfg.AspectY);
 	gr_init_canvas(grd_curscreen->sc_canvas, gr_new_bm_data, bm_mode::vulkan, w, h);
 
+	/* Match the window to the mode (ogl_init_window); in fullscreen the
+	 * window keeps the desktop size. */
+	const auto SDLWindow{g_pRebirthSDLMainWindow};
+	if (!(SDL_GetWindowFlags(SDLWindow) & SDL_WINDOW_FULLSCREEN))
+		SDL_SetWindowSize(SDLWindow, w, h);
 
 	vks_recreate_swapchain(w, h);
 

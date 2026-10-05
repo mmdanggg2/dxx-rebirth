@@ -631,7 +631,7 @@ static int main(int argc, char *argv[])
 	con_puts(CON_DEBUG, "Initializing font system...");
 	gamefont_init();	// must load after palette data loaded.
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	gr_set_mode_from_window_size();
 #else
 	gr_set_mode(Game_screen_mode);
