@@ -20,38 +20,32 @@
 namespace dcx {
 
 /* Vulkan texture wrapper — the Vulkan equivalent of ogl_texture.
- * Holds a VkImage, its view, sampler, descriptor set, and staging resources.
+ * Holds a VkImage, its view, and a descriptor set binding the view with a
+ * shared sampler.
  */
 struct vks_texture
 {
 	VkImage image{};
 	VkImageView view{};
 	VkDeviceMemory memory{};
-	VkFormat format{};
-	VkImageLayout layout{};
 	uint32_t width{};
 	uint32_t height{};
-	uint32_t mip_levels{};
-	VkSampler sampler{};
 	/* Descriptor set binding this texture's view+sampler, written at upload
 	 * time and bound before any draw that samples it. */
 	VkDescriptorSet descriptor_set{};
-	VkBuffer staging_buffer{};
-	VkDeviceMemory staging_memory{};
-	size_t staging_size{};
-	int bytes_per_pixel{};
-	int wrapstate{};
-	unsigned long numrend{};
+	/* Pixel data of the root bitmap this texture was uploaded from, or
+	 * nullptr for a temporary texture or one already released. grs_bitmap is
+	 * copied by value (e.g. piggy aliases one GameBitmaps entry to another),
+	 * so several bitmaps can hold the same vktexture; a bitmap only uses or
+	 * frees it while this still names its own data. */
+	const color_palette_index *owner_data{};
 };
 
 /* Upper bound on simultaneously live textures; sizes the texture pool and the
- * descriptor pool. Needs headroom over the steady-state working set because
- * vks_freebmtexture defers destruction of textures freed while a frame is
- * recording (the recording command buffer still references their descriptor
- * sets); those stay allocated for up to VK_MAX_FRAMES_IN_FLIGHT frames, so the
- * high-water mark is the live set plus a couple of frames of churn. 2048 is
- * comfortably above any Descent scene. */
-constexpr uint32_t VKS_MAX_TEXTURES = 2048;
+ * descriptor pool. Needs headroom over the steady-state working set (D2 levels
+ * reference up to ~2600 bitmaps, plus fonts, HUD art and texmerge results)
+ * because destruction is deferred until no frame can reference a texture. */
+constexpr uint32_t VKS_MAX_TEXTURES = 8192;
 
 /* Texture filter enum — mirrors opengl_texture_filter */
 enum class vulkan_texture_filter : uint8_t
@@ -61,13 +55,10 @@ enum class vulkan_texture_filter : uint8_t
 	trilinear,
 };
 
-#define VKS_FLAG_MIPMAP (1 << 0)
-#define VKS_FLAG_NOCOLOR (1 << 1)
-
 /* Texture management */
-vks_texture* vks_get_free_texture();
-bool vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags);
-void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter texfilt, bool texanis, bool edgepad);
+/* The live texture for `bm` (resolved through its root bitmap), uploading it
+ * on first use as ogl_bindbmtex does. nullptr if no texture can be created. */
+vks_texture *vks_get_bmtexture(grs_bitmap &bm);
 /* Upload the `w`x`h` region of `src` at (`sx`,`sy`) through gr_current_pal
  * into a texture not attached to any bitmap (the Vulkan counterpart of the
  * scratch texture in ogl_ubitblt_i). Release it with vks_free_texture. */
@@ -75,7 +66,8 @@ vks_texture *vks_load_temporary_texture(const grs_bitmap &src, uint32_t sx, uint
 /* Destroy a texture once no recorded or in-flight frame can reference it. */
 void vks_free_texture(vks_texture &tex);
 void vks_freebmtexture(grs_bitmap &bm);
-/* Drain deferred texture destruction for a frame slot (call at frame begin). */
+/* Destroy textures released before frame slot `frame` was last submitted
+ * (call at frame begin, after that slot's fence wait). */
 void vks_flush_pending_texture_frees(uint32_t frame);
 
 /* Destroy all Vulkan resources (called during shutdown) */

@@ -326,14 +326,8 @@ static bool vks_draw_textured_quad(VkDescriptorSet ds, const float xa, const flo
 
 bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int dw, const int dh, grs_bitmap &bm, const vks_colors::array_type &color_array)
 {
-	/* Upload on demand (mirrors ogl_bindbmtex). The upload walks to the root
-	 * bitmap, so the live texture hangs off the root — look it up there. */
-	grs_bitmap *root = &bm;
-	while (root->bm_parent)
-		root = root->bm_parent;
-	if (!root->vktexture)
-		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
-	vks_texture *tex = root->vktexture;
+	/* Upload on demand (mirrors ogl_bindbmtex). */
+	vks_texture *const tex = vks_get_bmtexture(bm);
 	if (!tex)
 		return false;
 
@@ -643,14 +637,8 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	float alpha;
 	if (textured)
 	{
-		/* On-demand upload (mirrors ogl_bindbmtex): the live texture hangs
-		 * off the root bitmap after the upload walks the parent chain. */
-		grs_bitmap *root = &bm;
-		while (root->bm_parent)
-			root = root->bm_parent;
-		if (!root->vktexture)
-			vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
-		vks_texture *tex = root->vktexture;
+		/* On-demand upload (mirrors ogl_bindbmtex). */
+		vks_texture *const tex = vks_get_bmtexture(bm);
 		if (!tex)
 			return;
 		ds = tex->descriptor_set;
@@ -748,14 +736,8 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	if ((g3_rotate_point(pnt, pos) & clipping_code::behind) != clipping_code::None)
 		return;
 
-	/* On-demand upload (mirrors ogl_bindbmtex). The live texture hangs off the
-	 * root bitmap after the upload walks the parent chain. */
-	grs_bitmap *root = &bm;
-	while (root->bm_parent)
-		root = root->bm_parent;
-	if (!root->vktexture)
-		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
-	vks_texture *tex = root->vktexture;
+	/* On-demand upload (mirrors ogl_bindbmtex). */
+	vks_texture *const tex = vks_get_bmtexture(bm);
 	if (!tex)
 		return;
 	if (!vks_prepare_3d(canvas))

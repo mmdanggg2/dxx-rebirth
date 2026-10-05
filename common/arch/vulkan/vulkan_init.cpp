@@ -1325,6 +1325,7 @@ void vks_shutdown()
 	vkDeviceWaitIdle(vk_device);
 
 	vks_shutdown_textures();
+	vks_destroy_white_texture();
 	vks_destroy_descriptor_pool();
 
 	for (auto &fence : vk_in_flight_fences)
@@ -1339,7 +1340,6 @@ void vks_shutdown()
 	destroyDepthResources();
 	destroyColorResources();
 
-	vks_destroy_white_texture();
 	vks_destroy_vertex_buffers();
 
 	if (vk_fragment_shader)
