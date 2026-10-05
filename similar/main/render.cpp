@@ -1713,10 +1713,14 @@ void render_mine(grs_canvas &canvas, const vms_vector &Viewer_eye, const vcsegid
 							}
 							#if DXX_USE_OGL
 							glAlphaFunc(GL_GEQUAL,0.8); // prevent ugly outlines if an object (which is rendered later) is shown behind a grate, door, etc. if texture filtering is enabled. These sides are rendered later again with normal AlphaFunc
+							#elif DXX_USE_VULKAN
+							vks_set_alpha_test(0.8);
 							#endif
 							render_side(vcvertptr, canvas, seg, sn, wid, Viewer_eye);
 							#if DXX_USE_OGL
 							glAlphaFunc(GL_GEQUAL,0.02);
+							#elif DXX_USE_VULKAN
+							vks_set_alpha_test(0.02);
 							#endif
 						}
 						else

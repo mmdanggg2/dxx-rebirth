@@ -65,6 +65,11 @@ extern VkPipeline vk_3d_line_pipeline;
  * replace. Mirrors ogl_set_blending. */
 void vks_set_blend(gr_blend b);
 gr_blend vks_get_blend();
+/* Push-constant offset of the fragment shader's alpha-test reference. */
+constexpr uint32_t VKS_PUSH_ALPHA_REF_OFFSET = 16;
+/* Fragments whose alpha falls below `ref` are discarded; the counterpart of
+ * glAlphaFunc(GL_GEQUAL, ref). The default reference is 0.02. */
+void vks_set_alpha_test(float ref);
 extern VkDescriptorPool vk_descriptor_pool;
 
 /* 1x1 white texture descriptor set, bound for flat primitives (rect/line/pixel)

@@ -15,9 +15,11 @@
 #include "u_mem.h"
 #include "rle.h"
 #include "console.h"
+#include "config.h"
 
 #include <array>
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <vector>
 
@@ -38,10 +40,15 @@ static uint32_t next_unused_texture;
 constexpr uint32_t VKS_PENDING_SLOTS = 2;
 static std::array<std::vector<vks_texture *>, VKS_PENDING_SLOTS> pending_free;
 
-/* All textures share one sampler: drivers may cap the number of live samplers
- * (maxSamplerAllocationCount can be as low as 4000), far below the number of
- * textures a level uses. */
-static VkSampler vk_texture_sampler;
+/* Textures share samplers, one per (filter, anisotropy, wrap) combination:
+ * drivers may cap the number of live samplers (maxSamplerAllocationCount can
+ * be as low as 4000), far below the number of textures a level uses. */
+struct vks_sampler_mode
+{
+	vulkan_texture_filter filter;
+	bool anisotropic;
+};
+static std::array<std::array<std::array<VkSampler, 2>, 2>, 3> vk_texture_samplers;
 
 static bool is_pool_texture(const vks_texture &tex)
 {
@@ -53,7 +60,10 @@ static void vks_destroy_texture(vks_texture &tex)
 	if (!tex.image)
 		return;
 	if (tex.descriptor_set)
-		vkFreeDescriptorSets(vk_device, vk_descriptor_pool, 1, &tex.descriptor_set);
+	{
+		const std::array<VkDescriptorSet, VKS_DESCRIPTOR_SETS_PER_TEXTURE> sets{{tex.descriptor_set, tex.descriptor_set_clamp}};
+		vkFreeDescriptorSets(vk_device, vk_descriptor_pool, sets.size(), sets.data());
+	}
 	if (tex.view)
 		vkDestroyImageView(vk_device, tex.view, nullptr);
 	vkDestroyImage(vk_device, tex.image, nullptr);
@@ -105,55 +115,79 @@ static vks_texture *allocate_texture_slot()
 	return nullptr;
 }
 
-static VkSampler vks_get_sampler()
+/* Anisotropic filtering is honoured only when the device enabled it. */
+static bool vks_anisotropy_available()
 {
-	if (!vk_texture_sampler)
+	return vk_max_sampler_anisotropy > 1.0f;
+}
+
+/* Filter states matching ogl_loadtexture: classic is nearest (with a
+ * nearest-texel, linear-between-mips minification when anisotropy is on);
+ * upscale and trilinear filter linearly with trilinear mipmapping. */
+static VkSampler vks_get_sampler(const vks_sampler_mode mode, const bool clamp)
+{
+	auto &sampler = vk_texture_samplers[static_cast<uint8_t>(mode.filter)][mode.anisotropic][clamp];
+	if (!sampler)
 	{
+		const bool linear = mode.filter != vulkan_texture_filter::classic;
+		const auto address = clamp ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		VkSamplerCreateInfo samplerInfo{};
 		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		samplerInfo.magFilter = VK_FILTER_NEAREST;
-		samplerInfo.minFilter = VK_FILTER_NEAREST;
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.anisotropyEnable = VK_FALSE;
-		samplerInfo.maxAnisotropy = 1.0f;
+		samplerInfo.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+		samplerInfo.minFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+		samplerInfo.addressModeU = address;
+		samplerInfo.addressModeV = address;
+		samplerInfo.addressModeW = address;
+		samplerInfo.anisotropyEnable = mode.anisotropic;
+		samplerInfo.maxAnisotropy = mode.anisotropic ? vk_max_sampler_anisotropy : 1.0f;
 		samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
 		samplerInfo.unnormalizedCoordinates = VK_FALSE;
 		samplerInfo.compareEnable = VK_FALSE;
 		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 		samplerInfo.mipLodBias = 0.0f;
 		samplerInfo.minLod = 0.0f;
-		samplerInfo.maxLod = 0.0f;
-		if (vkCreateSampler(vk_device, &samplerInfo, nullptr, &vk_texture_sampler) != VK_SUCCESS)
+		samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+		if (vkCreateSampler(vk_device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS)
 			Error("Vulkan: Failed to create texture sampler");
 	}
-	return vk_texture_sampler;
+	return sampler;
 }
 
-static VkDescriptorSet allocate_descriptor_set()
+/* Mipmaps are generated with linear blits, which the texture format must
+ * support; without that, filtered textures fall back to a single level. */
+static bool vks_can_generate_mipmaps()
 {
+	static const bool supported = [] {
+		VkFormatProperties props;
+		vkGetPhysicalDeviceFormatProperties(vk_physical_device, VK_FORMAT_R8G8B8A8_UNORM, &props);
+		constexpr VkFormatFeatureFlags needed = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+		return (props.optimalTilingFeatures & needed) == needed;
+	}();
+	return supported;
+}
+
+static uint32_t vks_mip_levels(const uint32_t w, const uint32_t h)
+{
+	return std::bit_width(std::max(w, h));
+}
+
+/* Create a `w`x`h` RGBA texture with `mip_levels` levels in `t`, sampled with
+ * `mode`. The descriptor sets are reserved first, so an exhausted pool is
+ * reported before any image or memory is created. */
+static bool vks_init_texture(vks_texture &t, const uint32_t w, const uint32_t h, const uint32_t mip_levels, const vks_sampler_mode mode)
+{
+	const std::array<VkDescriptorSetLayout, VKS_DESCRIPTOR_SETS_PER_TEXTURE> layouts{{vk_descriptor_set_layout, vk_descriptor_set_layout}};
+	std::array<VkDescriptorSet, VKS_DESCRIPTOR_SETS_PER_TEXTURE> sets{};
 	VkDescriptorSetAllocateInfo dsAlloc{};
 	dsAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 	dsAlloc.descriptorPool = vk_descriptor_pool;
-	dsAlloc.descriptorSetCount = 1;
-	dsAlloc.pSetLayouts = &vk_descriptor_set_layout;
-	VkDescriptorSet ds = VK_NULL_HANDLE;
-	if (vkAllocateDescriptorSets(vk_device, &dsAlloc, &ds) != VK_SUCCESS)
-		return VK_NULL_HANDLE;
-	return ds;
-}
-
-/* Create a `w`x`h` RGBA texture in `t`. The descriptor set is reserved first,
- * so an exhausted pool is reported before any image or memory is created. */
-static bool vks_init_texture(vks_texture &t, const uint32_t w, const uint32_t h)
-{
-	t.descriptor_set = allocate_descriptor_set();
-	if (!t.descriptor_set)
+	dsAlloc.descriptorSetCount = layouts.size();
+	dsAlloc.pSetLayouts = layouts.data();
+	if (vkAllocateDescriptorSets(vk_device, &dsAlloc, sets.data()) != VK_SUCCESS)
 		return false;
-	t.width = w;
-	t.height = h;
+	t.descriptor_set = sets[0];
+	t.descriptor_set_clamp = sets[1];
 	constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
 	/* Create image */
@@ -163,11 +197,12 @@ static bool vks_init_texture(vks_texture &t, const uint32_t w, const uint32_t h)
 	imageInfo.extent.width = w;
 	imageInfo.extent.height = h;
 	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = 1;
+	imageInfo.mipLevels = mip_levels;
 	imageInfo.arrayLayers = 1;
 	imageInfo.format = format;
 	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+		(mip_levels > 1 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -205,28 +240,30 @@ static bool vks_init_texture(vks_texture &t, const uint32_t w, const uint32_t h)
 	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	viewInfo.format = format;
 	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.levelCount = mip_levels;
 	viewInfo.subresourceRange.layerCount = 1;
 
 	result = vkCreateImageView(vk_device, &viewInfo, nullptr, &t.view);
 	if (!(result == VK_SUCCESS)) Error("Vulkan: Failed to create texture image view");
 
-	/* Bind this texture's view and the shared sampler to the descriptor set,
-	 * so any draw sampling this texture can bind the set directly. */
-	VkDescriptorImageInfo descImageInfo{};
-	descImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	descImageInfo.imageView = t.view;
-	descImageInfo.sampler = vks_get_sampler();
-
-	VkWriteDescriptorSet descriptorWrite{};
-	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	descriptorWrite.dstSet = t.descriptor_set;
-	descriptorWrite.dstBinding = 0;
-	descriptorWrite.dstArrayElement = 0;
-	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	descriptorWrite.descriptorCount = 1;
-	descriptorWrite.pImageInfo = &descImageInfo;
-	vkUpdateDescriptorSets(vk_device, 1, &descriptorWrite, 0, nullptr);
+	/* Bind this texture's view and the shared samplers to the descriptor
+	 * sets, so any draw sampling this texture can bind a set directly. */
+	std::array<VkDescriptorImageInfo, VKS_DESCRIPTOR_SETS_PER_TEXTURE> descImageInfo{};
+	std::array<VkWriteDescriptorSet, VKS_DESCRIPTOR_SETS_PER_TEXTURE> descriptorWrite{};
+	for (uint32_t i = 0; i != VKS_DESCRIPTOR_SETS_PER_TEXTURE; ++i)
+	{
+		descImageInfo[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		descImageInfo[i].imageView = t.view;
+		descImageInfo[i].sampler = vks_get_sampler(mode, i != 0);
+		descriptorWrite[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrite[i].dstSet = sets[i];
+		descriptorWrite[i].dstBinding = 0;
+		descriptorWrite[i].dstArrayElement = 0;
+		descriptorWrite[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		descriptorWrite[i].descriptorCount = 1;
+		descriptorWrite[i].pImageInfo = &descImageInfo[i];
+	}
+	vkUpdateDescriptorSets(vk_device, descriptorWrite.size(), descriptorWrite.data(), 0, nullptr);
 	return true;
 }
 
@@ -234,13 +271,13 @@ static bool vks_init_texture(vks_texture &t, const uint32_t w, const uint32_t h)
  * the descriptor pool is exhausted, reclaim textures whose deferred
  * destruction is due and retry once; if that still fails, report it and
  * return nullptr so the draw is skipped rather than aborting. */
-static vks_texture *vks_create_texture(const uint32_t w, const uint32_t h)
+static vks_texture *vks_create_texture(const uint32_t w, const uint32_t h, const uint32_t mip_levels, const vks_sampler_mode mode)
 {
 	for (bool retried = false;; retried = true)
 	{
 		if (vks_texture *const tex = allocate_texture_slot())
 		{
-			if (vks_init_texture(*tex, w, h))
+			if (vks_init_texture(*tex, w, h, mip_levels, mode))
 				return tex;
 			*tex = {};
 			free_textures.push_back(static_cast<uint32_t>(tex - texture_pool.data()));
@@ -403,9 +440,10 @@ static void vks_submit_pending_uploads()
 	vkQueueWaitIdle(vk_graphics_queue);
 }
 
-/* Record an upload of `rgba` (`w`x`h` RGBA8 texels) into `image`, with the
- * layout transitions to make it sampleable by the frame that follows. */
-static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, const uint32_t w, const uint32_t h)
+/* Record an upload of `rgba` (`w`x`h` RGBA8 texels) into level 0 of `image`,
+ * generate its remaining `mip_levels` - 1 levels with linear blits, and
+ * transition every level to be sampleable by the frame that follows. */
+static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, const uint32_t w, const uint32_t h, const uint32_t mip_levels)
 {
 	auto &slot = vks_begin_uploads();
 	const VkDeviceSize imageSize = static_cast<VkDeviceSize>(w) * h * 4;
@@ -435,10 +473,10 @@ static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, cons
 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 	barrier.image = image;
 	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.levelCount = 1;
+	barrier.subresourceRange.levelCount = mip_levels;
 	barrier.subresourceRange.layerCount = 1;
 
-	/* UNDEFINED -> TRANSFER_DST_OPTIMAL */
+	/* UNDEFINED -> TRANSFER_DST_OPTIMAL, every level */
 	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	barrier.srcAccessMask = 0;
@@ -450,7 +488,43 @@ static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, cons
 	vkCmdCopyBufferToImage(slot.cmd, chunk.buffer, image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	/* TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL */
+	barrier.subresourceRange.levelCount = 1;
+	int32_t mw = static_cast<int32_t>(w), mh = static_cast<int32_t>(h);
+	for (uint32_t level = 1; level < mip_levels; ++level)
+	{
+		/* Level - 1 becomes the blit source, then is final. */
+		barrier.subresourceRange.baseMipLevel = level - 1;
+		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		vkCmdPipelineBarrier(slot.cmd,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+		const int32_t nw = std::max(mw / 2, 1), nh = std::max(mh / 2, 1);
+		VkImageBlit blit{};
+		blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1};
+		blit.srcOffsets[1] = {mw, mh, 1};
+		blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+		blit.dstOffsets[1] = {nw, nh, 1};
+		vkCmdBlitImage(slot.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		vkCmdPipelineBarrier(slot.cmd,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			0, 0, nullptr, 0, nullptr, 1, &barrier);
+		mw = nw;
+		mh = nh;
+	}
+
+	/* The last level was only written: TRANSFER_DST_OPTIMAL ->
+	 * SHADER_READ_ONLY_OPTIMAL */
+	barrier.subresourceRange.baseMipLevel = mip_levels - 1;
 	barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -460,12 +534,11 @@ static void vks_upload_rgba(const VkImage image, const uint8_t *const rgba, cons
 		0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-/* Expand `w`x`h` paletted pixels (row stride `rowsize`) into RGBA via `pal`
- * and upload them into `tex`. Mirrors ogl_filltexbuf: index 255 with
- * BM_FLAG_TRANSPARENT and index 254 with BM_FLAG_SUPER_TRANSPARENT become
- * fully transparent; everything else maps through the palette (entries are
- * 0..63, scaled by 4). */
-static void vks_upload_paletted(vks_texture &tex, const uint8_t *src, const uint32_t rowsize, const uint32_t w, const uint32_t h, const uint8_t bmflags, const palette_array_t &pal)
+/* Expand `w`x`h` paletted pixels (row stride `rowsize`) into RGBA via `pal`.
+ * Mirrors ogl_filltexbuf: index 255 with BM_FLAG_TRANSPARENT and index 254
+ * with BM_FLAG_SUPER_TRANSPARENT become fully transparent; everything else
+ * maps through the palette (entries are 0..63, scaled by 4). */
+static std::vector<uint8_t> vks_expand_paletted(const uint8_t *src, const uint32_t rowsize, const uint32_t w, const uint32_t h, const uint8_t bmflags, const palette_array_t &pal)
 {
 	std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
 	uint8_t *out = rgba.data();
@@ -487,7 +560,92 @@ static void vks_upload_paletted(vks_texture &tex, const uint8_t *src, const uint
 			out += 4;
 		}
 	}
-	vks_upload_rgba(tex.image, rgba.data(), w, h);
+	return rgba;
+}
+
+/* Bleed colour into transparent texels from an opaque neighbour, so linear
+ * filtering does not darken the edges of see-through areas ("dark edges
+ * problem"). A port of the edge padding in ogl_loadtexture. */
+static void vks_edgepad(std::vector<uint8_t> &rgba, const uint32_t w)
+{
+	uint8_t *p = rgba.data();
+	uint8_t *const pdone = p + rgba.size() - 4;
+	const ptrdiff_t line = 4 * static_cast<ptrdiff_t>(w);
+	p += 4;
+	uint8_t *const ptop = p + line;
+	uint8_t *const pbottom = pdone - line;
+	const auto copy_from = [](uint8_t *const d, const uint8_t *const s) {
+		d[0] = s[0];
+		d[1] = s[1];
+		d[2] = s[2];
+	};
+	for (; p < pdone; p += 4)
+	{
+		//offsets 0 to 2 are r, g, b. offset 3 is alpha. 0x00 is transparent, 0xff is opaque.
+		if (p[3])
+			continue;
+		if (p[-1])
+			copy_from(p, p - 4);	//from left
+		else if (p[7])
+			copy_from(p, p + 4);	//from right
+		else if (p >= ptop && p[-line + 3])
+			copy_from(p, p - line);	//from above
+		else if (p < pbottom && p[line + 3])
+			copy_from(p, p + line);	//from below
+		else if (p < pbottom && p[line - 1])
+			copy_from(p, p + line - 4);	//bottom left
+		else if (p < pbottom && p[line + 7])
+			copy_from(p, p + line + 4);	//bottom right
+		else if (p >= ptop && p[-line - 1])
+			copy_from(p, p - line - 4);	//top left
+		else if (p >= ptop && p[-line + 7])
+			copy_from(p, p - line + 4);	//top right
+	}
+}
+
+/* Nearest-neighbour enlargement for the "upscale" filter, so linear
+ * filtering keeps texels blocky but smooths their borders. */
+static std::vector<uint8_t> vks_upscale(const std::vector<uint8_t> &rgba, const uint32_t w, const uint32_t h, const uint32_t rescale)
+{
+	std::vector<uint8_t> out(rgba.size() * rescale * rescale);
+	const uint32_t ow = w * rescale;
+	for (uint32_t y = 0; y < h * rescale; ++y)
+		for (uint32_t x = 0; x < ow; ++x)
+			std::memcpy(&out[(static_cast<size_t>(y) * ow + x) * 4], &rgba[(static_cast<size_t>(y / rescale) * w + x / rescale) * 4], 4);
+	return out;
+}
+
+/* Create and upload a texture for `w`x`h` RGBA texels with filtering
+ * `texfilt` (and anisotropy if `texanis`), following ogl_loadtexture's
+ * choices: edge padding when filtering, 4x enlargement for "upscale" unless
+ * the image exceeds 256 texels (then classic), and a mip chain for the
+ * filtered modes or anisotropic classic. */
+static vks_texture *vks_create_rgba_texture(std::vector<uint8_t> rgba, const uint32_t w, const uint32_t h, vulkan_texture_filter texfilt, bool texanis, const bool edgepad)
+{
+	texanis = texanis && vks_anisotropy_available();
+	if (texfilt != vulkan_texture_filter::classic && edgepad)
+		vks_edgepad(rgba, w);
+	uint32_t rescale = 1;
+	if (texfilt == vulkan_texture_filter::upscale)
+	{
+		if (w > 256 || h > 256)
+			texfilt = vulkan_texture_filter::classic;
+		else
+		{
+			rescale = 4;
+			rgba = vks_upscale(rgba, w, h, rescale);
+		}
+	}
+	const uint32_t iw = w * rescale, ih = h * rescale;
+	const bool mipmap = (texfilt != vulkan_texture_filter::classic || texanis) && vks_can_generate_mipmaps();
+	const uint32_t mip_levels = mipmap ? vks_mip_levels(iw, ih) : 1;
+	vks_texture *const tex = vks_create_texture(iw, ih, mip_levels, {texfilt, texanis});
+	if (!tex)
+		return nullptr;
+	vks_upload_rgba(tex->image, rgba.data(), iw, ih, mip_levels);
+	tex->width = w;
+	tex->height = h;
+	return tex;
 }
 
 static grs_bitmap &vks_root_bitmap(grs_bitmap &bm)
@@ -498,7 +656,7 @@ static grs_bitmap &vks_root_bitmap(grs_bitmap &bm)
 	return *root;
 }
 
-static void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool /*texanis*/, bool /*edgepad*/)
+static void vks_loadbmtexture_f(grs_bitmap &bm, const vulkan_texture_filter texfilt, const bool texanis, const bool edgepad)
 {
 	/* Sub-bitmaps reference their parent's pixel data; upload from the root, as
 	 * ogl_loadbmtexture_f does. */
@@ -525,16 +683,14 @@ static void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*
 		rowsize = root.bm_rowsize;
 	}
 
-	vks_texture *const tex = vks_create_texture(w, h);
-	if (!tex)
-		return;	/* leave bm.vktexture null so the draw skips */
-
 	/* Bake through gr_palette -- the selected game/art palette (set by
 	 * gr_use_palette_table / the PCX loader), NOT the bound gr_current_pal,
 	 * which lags until gr_palette_load. This mirrors
 	 * ogl_loadtexture(gr_palette, ...) so fullscreen bitmaps uploaded before
 	 * their gr_palette_load (briefing/title screens) get the right colours. */
-	vks_upload_paletted(*tex, src, rowsize, w, h, root.get_flags(), gr_palette);
+	vks_texture *const tex = vks_create_rgba_texture(vks_expand_paletted(src, rowsize, w, h, root.get_flags(), gr_palette), w, h, texfilt, texanis, edgepad);
+	if (!tex)
+		return;	/* leave bm.vktexture null so the draw skips */
 
 	/* Attach the texture to the root bitmap. The bitmap stays bm_mode::linear —
 	 * the 2D blit dispatch (e.g. show_fullscr) selects the Vulkan path from the
@@ -544,7 +700,7 @@ static void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*
 	root.vktexture = tex;
 }
 
-vks_texture *vks_get_bmtexture(grs_bitmap &bm)
+vks_texture *vks_get_bmtexture(grs_bitmap &bm, const bool edgepad)
 {
 	grs_bitmap &root = vks_root_bitmap(bm);
 	/* A pointer copied from another bitmap, or left behind after its owner
@@ -553,18 +709,14 @@ vks_texture *vks_get_bmtexture(grs_bitmap &bm)
 	if (const auto tex = root.vktexture; tex && (!tex->owner_data || tex->owner_data != root.get_bitmap_data()))
 		root.vktexture = nullptr;
 	if (!root.vktexture)
-		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
+		vks_loadbmtexture_f(bm, vulkan_texture_filter{static_cast<uint8_t>(CGameCfg.TexFilt)}, CGameCfg.TexAnisotropy, edgepad);
 	return root.vktexture;
 }
 
-vks_texture *vks_load_temporary_texture(const grs_bitmap &src, const uint32_t sx, const uint32_t sy, const uint32_t w, const uint32_t h)
+vks_texture *vks_load_temporary_texture(const grs_bitmap &src, const uint32_t sx, const uint32_t sy, const uint32_t w, const uint32_t h, const vulkan_texture_filter texfilt)
 {
-	vks_texture *const tex = vks_create_texture(w, h);
-	if (!tex)
-		return nullptr;
 	const uint32_t rowsize = src.bm_rowsize;
-	vks_upload_paletted(*tex, src.get_bitmap_data() + static_cast<size_t>(sy) * rowsize + sx, rowsize, w, h, src.get_flags(), gr_current_pal);
-	return tex;
+	return vks_create_rgba_texture(vks_expand_paletted(src.get_bitmap_data() + static_cast<size_t>(sy) * rowsize + sx, rowsize, w, h, src.get_flags(), gr_current_pal), w, h, texfilt, false, false);
 }
 
 void vks_free_texture(vks_texture &tex)
@@ -595,6 +747,14 @@ void vks_freebmtexture(grs_bitmap &bm)
 		vks_free_texture(*tex);
 }
 
+void vks_release_bitmap_textures()
+{
+	/* Bitmaps notice the release through owner_data and re-upload. */
+	for (auto &tex : texture_pool)
+		if (tex.owner_data)
+			vks_free_texture(tex);
+}
+
 void vks_flush_pending_texture_frees(uint32_t frame)
 {
 	auto &v = pending_free[frame % VKS_PENDING_SLOTS];
@@ -622,11 +782,14 @@ void vks_shutdown_textures()
 	next_unused_texture = 0;
 	for (auto &v : pending_free)
 		v.clear();
-	if (vk_texture_sampler)
-	{
-		vkDestroySampler(vk_device, vk_texture_sampler, nullptr);
-		vk_texture_sampler = VK_NULL_HANDLE;
-	}
+	for (auto &by_filter : vk_texture_samplers)
+		for (auto &by_anisotropy : by_filter)
+			for (auto &sampler : by_anisotropy)
+				if (sampler)
+				{
+					vkDestroySampler(vk_device, sampler, nullptr);
+					sampler = VK_NULL_HANDLE;
+				}
 	for (auto &slot : upload_slots)
 	{
 		for (auto &chunk : slot.chunks)
@@ -647,10 +810,11 @@ static vks_texture vk_white_texture;
 
 void vks_init_white_texture()
 {
-	if (!vks_init_texture(vk_white_texture, 1, 1))
+	if (!vks_init_texture(vk_white_texture, 1, 1, 1, {vulkan_texture_filter::classic, false}))
 		Error("Vulkan: Failed to create white texture");
 	constexpr uint8_t white[4] = {255, 255, 255, 255};
-	vks_upload_rgba(vk_white_texture.image, white, 1, 1);
+	vks_upload_rgba(vk_white_texture.image, white, 1, 1, 1);
+	vk_white_texture.width = vk_white_texture.height = 1;
 	vk_white_descriptor_set = vk_white_texture.descriptor_set;
 }
 

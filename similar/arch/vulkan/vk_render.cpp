@@ -108,6 +108,18 @@ static float vks_linedotscale()
 
 /* --- 2D draw helpers -------------------------------------------------------- */
 
+static float vks_alpha_ref = 0.02f;
+
+void vks_set_alpha_test(const float ref)
+{
+	vks_alpha_ref = ref;
+}
+
+static void vks_push_alpha_ref(const VkCommandBuffer cmd)
+{
+	vkCmdPushConstants(cmd, vk_2d_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, VKS_PUSH_ALPHA_REF_OFFSET, sizeof(vks_alpha_ref), &vks_alpha_ref);
+}
+
 /* Bind the 2D pipeline and set the full-screen viewport, scissor, and
  * pixel->NDC push constant. Canvas-local coordinates are folded into the
  * vertex positions by each caller (adding canvas.cv_bitmap.bm_x/y), matching
@@ -127,6 +139,7 @@ static bool vks_prepare_2d(const VkPipeline pipeline = vk_2d_pipeline)
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 	const float push[4] = {2.0f / w, 2.0f / h, -1.0f, -1.0f};
 	vkCmdPushConstants(cmd, vk_2d_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), push);
+	vks_push_alpha_ref(cmd);
 	return true;
 }
 
@@ -167,6 +180,7 @@ static bool vks_prepare_3d(grs_canvas &canvas)
 	const VkRect2D scissor{{static_cast<int32_t>(canvas.cv_bitmap.bm_x), static_cast<int32_t>(canvas.cv_bitmap.bm_y)},
 		{static_cast<uint32_t>(canvas.cv_bitmap.bm_w), static_cast<uint32_t>(canvas.cv_bitmap.bm_h)}};
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
+	vks_push_alpha_ref(cmd);
 	return true;
 }
 
@@ -341,8 +355,9 @@ static bool vks_draw_textured_quad(VkDescriptorSet ds, const float xa, const flo
 
 bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int dw, const int dh, grs_bitmap &bm, const vks_colors::array_type &color_array)
 {
-	/* Upload on demand (mirrors ogl_bindbmtex). */
-	vks_texture *const tex = vks_get_bmtexture(bm);
+	/* Upload on demand (mirrors ogl_bindbmtex); sampled clamped to the edge
+	 * like ogl_texwrap(GL_CLAMP_TO_EDGE). */
+	vks_texture *const tex = vks_get_bmtexture(bm, false);
 	if (!tex)
 		return false;
 
@@ -365,21 +380,21 @@ bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int d
 	const float v0 = bm.bm_y / th;
 	const float v1 = (bm.bm_y + bm.bm_h) / th;
 
-	return vks_draw_textured_quad(tex->descriptor_set, xa, ya, xb, yb, u0, v0, u1, v1, color_array);
+	return vks_draw_textured_quad(tex->descriptor_set_clamp, xa, ya, xb, yb, u0, v0, u1, v1, color_array);
 }
 
 /* Blit the `sw`x`sh` region of `src` at (`sx`,`sy`) scaled to `dw`x`dh` at
  * (`dx`,`dy`) of `dest`. Like ogl_ubitblt_i, the source is uploaded to a
  * scratch texture through gr_current_pal on every call (movie frames and other
  * bitmaps whose pixels change between draws), released after the frame. */
-bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned sw, unsigned sh, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest, vulkan_texture_filter /*texfilt*/)
+bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned sw, unsigned sh, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest, const vulkan_texture_filter texfilt)
 {
-	vks_texture *const tex = vks_load_temporary_texture(src, sx, sy, sw, sh);
+	vks_texture *const tex = vks_load_temporary_texture(src, sx, sy, sw, sh, texfilt);
 	if (!tex)
 		return false;
 	const float xa = static_cast<float>(dx + dest.bm_x);
 	const float ya = static_cast<float>(dy + dest.bm_y);
-	const bool drawn = vks_draw_textured_quad(tex->descriptor_set, xa, ya, xa + dw, ya + dh, 0.f, 0.f, 1.f, 1.f, vks_colors::white);
+	const bool drawn = vks_draw_textured_quad(tex->descriptor_set_clamp, xa, ya, xa + dw, ya + dh, 0.f, 0.f, 1.f, 1.f, vks_colors::white);
 	vks_free_texture(*tex);
 	return drawn;
 }
@@ -637,7 +652,9 @@ void _g3_draw_poly(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
 
-void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> pointlist, const g3s_uvl *const uvl_list, const g3s_lrgb *const light_rgb, grs_bitmap &bm, const tmap_drawer_type tmap_drawer_ptr)
+/* Draw a texture-mapped face; `edgepad` is passed to the upload as
+ * ogl_bindbmtex's does (set for overlays). */
+static void vks_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> pointlist, const g3s_uvl *const uvl_list, const g3s_lrgb *const light_rgb, grs_bitmap &bm, const tmap_drawer_type tmap_drawer_ptr, const bool edgepad)
 {
 	const auto nv = pointlist.size();
 	if (nv < 3 || nv > MAX_POINTS_PER_POLY)
@@ -653,7 +670,7 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	if (textured)
 	{
 		/* On-demand upload (mirrors ogl_bindbmtex). */
-		vks_texture *const tex = vks_get_bmtexture(bm);
+		vks_texture *const tex = vks_get_bmtexture(bm, edgepad);
 		if (!tex)
 			return;
 		ds = tex->descriptor_set;
@@ -688,6 +705,11 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	vks_emit_3d(ds, verts.data(), static_cast<uint32_t>(nv));
 }
 
+void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> pointlist, const g3s_uvl *const uvl_list, const g3s_lrgb *const light_rgb, grs_bitmap &bm, const tmap_drawer_type tmap_drawer_ptr)
+{
+	vks_draw_tmap(canvas, pointlist, uvl_list, light_rgb, bm, tmap_drawer_ptr, false);
+}
+
 /* Wall with an overlay texture (tmap_num2): draw the base, then the overlay
  * over the same polygon with its texture coordinates rotated by `orient`, as
  * the OpenGL _g3_draw_tmap_2 does. The overlay pass has the same depth, so
@@ -720,7 +742,7 @@ void _g3_draw_tmap_2(grs_canvas &canvas, const std::span<g3_draw_tmap_point *con
 				break;
 		}
 	}
-	_g3_draw_tmap(canvas, pointlist, rotated.data(), light_rgb.data(), bm, draw_tmap);
+	vks_draw_tmap(canvas, pointlist, rotated.data(), light_rgb.data(), bm, draw_tmap, true);
 }
 
 void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint8_t color)
@@ -786,8 +808,9 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	if ((g3_rotate_point(pnt, pos) & clipping_code::behind) != clipping_code::None)
 		return;
 
-	/* On-demand upload (mirrors ogl_bindbmtex). */
-	vks_texture *const tex = vks_get_bmtexture(bm);
+	/* On-demand upload (mirrors ogl_bindbmtex); sampled clamped to the edge
+	 * like ogl_texwrap(GL_CLAMP_TO_EDGE). */
+	vks_texture *const tex = vks_get_bmtexture(bm, false);
 	if (!tex)
 		return;
 	if (!vks_prepare_3d(canvas))
@@ -820,7 +843,7 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 		{cx + w, cy - h, cz, u1, v1, 1.f, 1.f, 1.f, alpha},
 		{cx - w, cy - h, cz, u0, v1, 1.f, 1.f, 1.f, alpha},
 	};
-	vks_emit_3d(tex->descriptor_set, verts, 4);
+	vks_emit_3d(tex->descriptor_set_clamp, verts, 4);
 }
 
 /* 2D bitmap drawing */
@@ -883,7 +906,7 @@ void vks_cache_polymodel_textures(const polygon_model_index model_num)
 	{
 		const auto objbitmap = ObjBitmaps[ObjBitmapPtrs[i]];
 		PIGGY_PAGE_IN(objbitmap);
-		vks_get_bmtexture(GameBitmaps[objbitmap]);
+		vks_get_bmtexture(GameBitmaps[objbitmap], true);
 	}
 }
 
@@ -896,7 +919,7 @@ static void vks_cache_vclip_textures(const vclip &vc)
 	for (const auto i : partial_const_range(vc.frames, vc.num_frames))
 	{
 		PIGGY_PAGE_IN(i);
-		vks_get_bmtexture(GameBitmaps[i]);
+		vks_get_bmtexture(GameBitmaps[i], false);
 	}
 }
 
@@ -981,9 +1004,9 @@ void vks_cache_level_textures()
 					if (bm2.get_flag_mask(BM_FLAG_SUPER_TRANSPARENT))
 						bm = &texmerge_get_cached_bitmap(GameBitmaps, Textures, tmap1, tmap2);
 					else
-						vks_get_bmtexture(bm2);
+						vks_get_bmtexture(bm2, true);
 				}
-				vks_get_bmtexture(*bm);
+				vks_get_bmtexture(*bm, false);
 			}
 		}
 	}
@@ -1046,7 +1069,7 @@ void vks_cache_level_textures()
 					if (!GameBitmaps.valid_index(t)) [[unlikely]]
 						continue;
 					PIGGY_PAGE_IN(t);
-					vks_get_bmtexture(GameBitmaps[t]);
+					vks_get_bmtexture(GameBitmaps[t], true);
 				}
 				else if (tmap_override == texture_index{UINT16_MAX}) [[likely]]
 					vks_cache_polymodel_textures(objp->rtype.pobj_info.model_num.dsx);

@@ -44,6 +44,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "nvparse.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_textures.h"
 #endif
 #include <memory>
 
@@ -286,6 +288,8 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 	CGameCfg.WindowMode = false;
 #if DXX_USE_OGL
 	CGameCfg.TexFilt = opengl_texture_filter::classic;
+#elif DXX_USE_VULKAN
+	CGameCfg.TexFilt = opengl_texture_filter{static_cast<uint8_t>(vulkan_texture_filter::classic)};
 #endif
 	CGameCfg.TexAnisotropy = 0;
 #if DXX_BUILD_DESCENT == 2
@@ -398,6 +402,10 @@ void ReadConfigFile(CCfg &CGameCfg, Cfg &GameCfg)
 					case static_cast<unsigned>(opengl_texture_filter::classic):
 					case static_cast<unsigned>(opengl_texture_filter::upscale):
 					case static_cast<unsigned>(opengl_texture_filter::trilinear):
+#elif DXX_USE_VULKAN
+					case static_cast<unsigned>(vulkan_texture_filter::classic):
+					case static_cast<unsigned>(vulkan_texture_filter::upscale):
+					case static_cast<unsigned>(vulkan_texture_filter::trilinear):
 #else
 					default:
 						/* In SDL-only builds, accept any value and save it.

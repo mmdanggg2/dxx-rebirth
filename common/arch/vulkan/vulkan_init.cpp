@@ -895,17 +895,22 @@ void vks_init_render_pass()
 static void vks_init_pipeline_layout_and_shaders()
 {
 	/* --- pipeline layout (shared by 2D and 3D) --- */
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(float) * 4;
+	/* Vertex: the 2D pixel->NDC scale and offset. Fragment: the alpha-test
+	 * reference (glAlphaFunc). */
+	std::array<VkPushConstantRange, 2> pushRanges{};
+	pushRanges[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	pushRanges[0].offset = 0;
+	pushRanges[0].size = sizeof(float) * 4;
+	pushRanges[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushRanges[1].offset = VKS_PUSH_ALPHA_REF_OFFSET;
+	pushRanges[1].size = sizeof(float);
 
 	VkPipelineLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	layoutInfo.setLayoutCount = 1;
 	layoutInfo.pSetLayouts = &vk_descriptor_set_layout;
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushRange;
+	layoutInfo.pushConstantRangeCount = pushRanges.size();
+	layoutInfo.pPushConstantRanges = pushRanges.data();
 	if (vkCreatePipelineLayout(vk_device, &layoutInfo, nullptr, &vk_2d_pipeline_layout) != VK_SUCCESS)
 		Error("Vulkan: Failed to create pipeline layout");
 
@@ -1282,17 +1287,19 @@ void vks_init_sync_objects()
 
 void vks_init_descriptor_pool()
 {
-	/* One combined-image-sampler descriptor per texture slot. Created once in
-	 * gr_init and persists across resize/swapchain rebuilds, so existing
-	 * textures keep valid descriptor sets when the screen mode changes. */
+	/* One combined-image-sampler set per wrap mode for every texture slot,
+	 * plus the white texture's. Created once in gr_init and persists across
+	 * resize/swapchain rebuilds, so existing textures keep valid descriptor
+	 * sets when the screen mode changes. */
+	constexpr uint32_t sets = (VKS_MAX_TEXTURES + 1) * VKS_DESCRIPTOR_SETS_PER_TEXTURE;
 	VkDescriptorPoolSize poolSize{};
 	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSize.descriptorCount = VKS_MAX_TEXTURES;
+	poolSize.descriptorCount = sets;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-	poolInfo.maxSets = VKS_MAX_TEXTURES;
+	poolInfo.maxSets = sets;
 	poolInfo.poolSizeCount = 1;
 	poolInfo.pPoolSizes = &poolSize;
 
