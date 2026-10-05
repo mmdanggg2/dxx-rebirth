@@ -31,6 +31,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "pstypes.h"
 #include "timer.h"
@@ -1194,7 +1196,7 @@ static void flash_cursor(grs_canvas &canvas, const grs_font &cv_font, briefing *
 //-----------------------------------------------------------------------------
 static void show_animated_bitmap(grs_canvas &canvas, briefing *br)
 {
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	float scale = 1.0;
 
 	if ((static_cast<float>(SWIDTH)/320) < (static_cast<float>(SHEIGHT)/200))
@@ -1211,6 +1213,8 @@ static void show_animated_bitmap(grs_canvas &canvas, briefing *br)
 			PIGGY_PAGE_IN( bi );
 #if DXX_USE_OGL
 			ogl_ubitmapm_cs(canvas, rescale_x(canvas.cv_bitmap, 220), rescale_y(canvas.cv_bitmap, 45), bitmap_ptr->bm_w * scale, bitmap_ptr->bm_h * scale, *bitmap_ptr, 255);
+#elif DXX_USE_VULKAN
+			vks_ubitmapm_cs(canvas, rescale_x(canvas.cv_bitmap, 220), rescale_y(canvas.cv_bitmap, 45), bitmap_ptr->bm_w * scale, bitmap_ptr->bm_h * scale, *bitmap_ptr, 255);
 #else
 			gr_bitmapm(canvas, rescale_x(canvas.cv_bitmap, 220), rescale_y(canvas.cv_bitmap, 45), *bitmap_ptr);
 #endif
@@ -1283,6 +1287,8 @@ static void show_animated_bitmap(grs_canvas &canvas, briefing *br)
 		PIGGY_PAGE_IN( bi );
 #if DXX_USE_OGL
 		ogl_ubitmapm_cs(subcanvas, 0, 0, bitmap_ptr->bm_w*scale, bitmap_ptr->bm_h*scale, *bitmap_ptr, 255);
+#elif DXX_USE_VULKAN
+		vks_ubitmapm_cs(subcanvas, 0, 0, bitmap_ptr->bm_w*scale, bitmap_ptr->bm_h*scale, *bitmap_ptr, 255);
 #else
 		gr_bitmapm(subcanvas, 0, 0, *bitmap_ptr);
 #endif

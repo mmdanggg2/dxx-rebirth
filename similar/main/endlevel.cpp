@@ -72,6 +72,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "hudmsg.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 #include "joy.h"
@@ -373,7 +375,7 @@ void draw_stars(grs_canvas &canvas, const d_unique_endlevel_state::starfield_typ
 		{
 			p.p3_flags &= ~projection_flag::projected;
 			g3_project_point(p);
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 			gr_pixel(canvas.cv_bitmap, f2i(p.p3_sx), f2i(p.p3_sy), color);
 #else
 			g3_draw_sphere(canvas, p, F1_0 * 3, color);
@@ -653,9 +655,9 @@ static void render_external_scene(fvcobjptridx &vcobjptridx, grs_canvas &canvas,
 		if (alpha) // set nice transparency/blending for the big explosion
 			gr_settransblend(canvas, GR_FADE_OFF, gr_blend::additive_c);
 		draw_fireball(Vclip, canvas, vcobjptridx(external_explosion));
-#if DXX_USE_OGL
-		/* If !OGL, the third argument is discarded, so this call
-		 * becomes the same as the one above.
+#if DXX_USE_OGL || DXX_USE_VULKAN
+		/* In the software renderer, the third argument is discarded, so
+		 * this call becomes the same as the one above.
 		 */
 		if (alpha)
 			gr_settransblend(canvas, GR_FADE_OFF, gr_blend::normal); // revert any transparency/blending setting back to normal

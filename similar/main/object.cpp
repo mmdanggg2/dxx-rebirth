@@ -614,7 +614,7 @@ static void draw_polygon_object(grs_canvas &canvas, const d_level_unique_light_s
 
 			if (is_weapon_with_inner_model != polygon_model_index::None)
 			{
-				if constexpr (!DXX_USE_OGL) // in software rendering must draw inner model last
+				if constexpr (!DXX_USE_OGL && !DXX_USE_VULKAN) // in software rendering must draw inner model last
 				{
 				gr_settransblend(canvas, GR_FADE_OFF, gr_blend::additive_a);
 				if (draw_simple_model)

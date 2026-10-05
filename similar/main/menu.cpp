@@ -83,6 +83,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #if DXX_USE_OGL
 #include "ogl_init.h"
 #include "ogl_extensions.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 #include "physfs_list.h"
 
@@ -3071,7 +3073,7 @@ static void polygon_models_viewer()
 window_event_result gamebitmaps_viewer_window::event_handler(const d_event &event)
 {
 	int key{0};
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	float scale = 1.0;
 #endif
 
@@ -3110,9 +3112,13 @@ window_event_result gamebitmaps_viewer_window::event_handler(const d_event &even
 			PIGGY_PAGE_IN(bi);
 				auto &canvas = *grd_curcanv;
 				gr_clear_canvas(canvas, BM_XRGB(0,0,0));
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 				scale = (bm->bm_w > bm->bm_h)?(SHEIGHT/bm->bm_w)*0.8:(SHEIGHT/bm->bm_h)*0.8;
+#if DXX_USE_OGL
 				ogl_ubitmapm_cs(canvas, (SWIDTH / 2) - (bm->bm_w * scale / 2), (SHEIGHT / 2) - (bm->bm_h * scale / 2), bm->bm_w * scale, bm->bm_h * scale, *bm, ogl_colors::white);
+#else
+				vks_ubitmapm_cs(canvas, (SWIDTH / 2) - (bm->bm_w * scale / 2), (SHEIGHT / 2) - (bm->bm_h * scale / 2), bm->bm_w * scale, bm->bm_h * scale, *bm, vks_colors::white);
+#endif
 #else
 				gr_bitmap(canvas, (SWIDTH / 2) - (bm->bm_w / 2), (SHEIGHT / 2) - (bm->bm_h / 2), *bm);
 #endif

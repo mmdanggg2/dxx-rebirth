@@ -2977,7 +2977,7 @@ static void draw_static(const d_vclip_array &Vclip, const hud_draw_context_hs_mr
 	const vclip *const vc = &Vclip[vclip_index::monitor_static];
 	int framenum;
 	auto &multires_gauge_graphic = hudctx.multires_gauge_graphic;
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	int x,y;
 #endif
 
@@ -2996,7 +2996,7 @@ static void draw_static(const d_vclip_array &Vclip, const hud_draw_context_hs_mr
 	auto &resbox = gauge_boxes[multires_gauge_graphic.hiresmode];
 	auto &weaponbox = resbox[win];
 	auto &box = weaponbox[(PlayerCfg.CockpitMode[1] == cockpit_mode_t::status_bar) ? gauge_hud_type::statusbar : gauge_hud_type::cockpit];
-#if !DXX_USE_OGL
+#if !DXX_USE_OGL && !DXX_USE_VULKAN
 	for (x = box.left; x < box.right; x += bmp.bm_w)
 		for (y = box.top; y < box.bot; y += bmp.bm_h)
 			gr_bitmap(hudctx.canvas, x, y, bmp);

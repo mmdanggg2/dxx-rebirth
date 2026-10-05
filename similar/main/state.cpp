@@ -71,6 +71,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "gr.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 #if DXX_USE_EDITOR
@@ -254,7 +256,7 @@ void savegame_chooser_newmenu::draw_handler(grs_canvas &canvas, const grs_bitmap
 {
 	const auto &&fspacx = FSPACX();
 	const auto &&fspacy = FSPACY();
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	auto temp_canv = gr_create_canvas(THUMBNAIL_W * 2, THUMBNAIL_H * 24 / 10);
 #else
 	auto temp_canv = gr_create_canvas(fspacx(THUMBNAIL_W), fspacy(THUMBNAIL_H));
@@ -268,6 +270,8 @@ void savegame_chooser_newmenu::draw_handler(grs_canvas &canvas, const grs_bitmap
 	const auto bx = (canvas.cv_bitmap.bm_w / 2) - fspacx(THUMBNAIL_W / 2);
 #if DXX_USE_OGL
 	ogl_ubitmapm_cs(canvas, bx, m[0].y - fspacy(3), fspacx(THUMBNAIL_W), fspacy(THUMBNAIL_H), temp_canv->cv_bitmap, ogl_colors::white);
+#elif DXX_USE_VULKAN
+	vks_ubitmapm_cs(canvas, bx, m[0].y - fspacy(3), fspacx(THUMBNAIL_W), fspacy(THUMBNAIL_H), temp_canv->cv_bitmap, vks_colors::white);
 #else
 	gr_bitmap(canvas, bx, m[0].y - 3, temp_canv->cv_bitmap);
 #endif
