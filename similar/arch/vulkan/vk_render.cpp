@@ -31,6 +31,7 @@
 #include "args.h"
 #include "palette.h"
 #include "3d.h"
+#include "texmap.h"
 #include "common/3d/globvars.h"
 
 #include <SDL.h>
@@ -74,6 +75,23 @@ void vks_init_state()
 {
 	/* Initialize palette */
 	vks_init_palette();
+}
+
+/* Vertex alpha for a canvas fade level, as every OpenGL draw path computes
+ * it: opaque at GR_FADE_OFF, otherwise 1 - fade/(GR_FADE_LEVELS-1). */
+static float vks_fade_alpha(const grs_canvas &canvas)
+{
+	return canvas.cv_fade_level >= GR_FADE_OFF
+		? 1.0f
+		: 1.0f - static_cast<float>(canvas.cv_fade_level) / (static_cast<float>(GR_FADE_LEVELS) - 1.0f);
+}
+
+/* Line width / point size in pixels, scaled with resolution like the OpenGL
+ * backend's linedotscale (glLineWidth/glPointSize). */
+static float vks_linedotscale()
+{
+	const auto min_wh = std::min(last_width / 640, last_height / 480);
+	return min_wh < 1 ? 1.0f : static_cast<float>(min_wh);
 }
 
 /* --- 2D draw helpers -------------------------------------------------------- */
@@ -169,19 +187,24 @@ void gr_flip(void)
 }
 
 /* Pixel drawing */
-void vks_upixelc(const grs_bitmap &/*cv_bitmap*/, unsigned x, unsigned y, const color_palette_index c)
+void vks_upixelc(const grs_bitmap &cv_bitmap, unsigned x, unsigned y, const color_palette_index c)
 {
 	const auto &col = vks_palette_colors[c];
-	const float fx = static_cast<float>(x);
-	const float fy = static_cast<float>(y);
+	/* Centre a linedotscale-sized square on the pixel, offset by the canvas
+	 * origin, as ogl_upixelc's GL_POINTS with glPointSize(linedotscale). */
+	const float half = vks_linedotscale() * 0.5f;
+	const float cx = static_cast<float>(x + cv_bitmap.bm_x) + 0.5f;
+	const float cy = static_cast<float>(y + cv_bitmap.bm_y) + 0.5f;
+	const float x0 = cx - half, x1 = cx + half;
+	const float y0 = cy - half, y1 = cy + half;
 	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
 	const vks_vertex v[6] = {
-		{fx,     fy,     0.f, 0.f, cr, cg, cb, ca},
-		{fx + 1.f, fy,     0.f, 0.f, cr, cg, cb, ca},
-		{fx + 1.f, fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
-		{fx,     fy,     0.f, 0.f, cr, cg, cb, ca},
-		{fx + 1.f, fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
-		{fx,     fy + 1.f, 0.f, 0.f, cr, cg, cb, ca},
+		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y1, 0.f, 0.f, cr, cg, cb, ca},
+		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
+		{x1, y1, 0.f, 0.f, cr, cg, cb, ca},
+		{x0, y1, 0.f, 0.f, cr, cg, cb, ca},
 	};
 	if (!vks_prepare_2d())
 		return;
@@ -206,16 +229,10 @@ void vks_urect(grs_canvas &canvas, int left, int top, int right, int bot, color_
 	const float x1 = (right + 1) + ox, y1 = (bot + 1) + oy;
 	const auto &col = vks_palette_colors[c];
 	const float cr = col[0], cg = col[1], cb = col[2];
-	/* Cloak/transparency fade: when cv_fade_level is active (0..LEVELS-1) the
-	 * software renderer darkens existing framebuffer pixels via gr_fade_table
-	 * rather than filling the source color. Approximate that here as a
-	 * semi-transparent overlay: alpha is the darkening fraction, so the
-	 * standard src*alpha+dst*(1-alpha) blend blackens the pixels beneath. At
-	 * GR_FADE_OFF the rect is opaque, matching a normal solid fill. */
-	const auto fl = static_cast<unsigned>(canvas.cv_fade_level);
-	const float ca = (fl < GR_FADE_LEVELS)
-		? (1.0f - static_cast<float>(fl) / static_cast<float>(GR_FADE_LEVELS - 1))
-		: col[3];
+	/* Cloak/transparency fade: when cv_fade_level is active the software
+	 * renderer darkens existing framebuffer pixels via gr_fade_table; like
+	 * ogl_urect, approximate that with a semi-transparent fill. */
+	const float ca = vks_fade_alpha(canvas);
 	const vks_vertex v[6] = {
 		{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
 		{x1, y0, 0.f, 0.f, cr, cg, cb, ca},
@@ -333,39 +350,33 @@ bool vks_ubitblt(unsigned w, unsigned h, unsigned dx, unsigned dy, unsigned sx, 
 void vks_ulinec(grs_canvas &canvas, int left, int top, int right, int bot, int c)
 {
 	const auto &col = vks_palette_colors[c];
-	const float cr = col[0], cg = col[1], cb = col[2], ca = col[3];
-	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x);
-	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y);
+	const float cr = col[0], cg = col[1], cb = col[2];
+	const float ca = vks_fade_alpha(canvas);
+	/* Endpoints at pixel centres, offset by the canvas origin. */
+	const float ox = static_cast<float>(canvas.cv_bitmap.bm_x) + 0.5f;
+	const float oy = static_cast<float>(canvas.cv_bitmap.bm_y) + 0.5f;
 	const float x0 = left + ox, y0 = top + oy;
 	const float x1 = right + ox, y1 = bot + oy;
+	const float half = vks_linedotscale() * 0.5f;
 
-	float dx = x1 - x0, dy = y1 - y0;
+	const float dx = x1 - x0, dy = y1 - y0;
 	const float len = std::sqrt(dx * dx + dy * dy);
-	if (len < 0.5f) {
-		/* Degenerate: render a single pixel. */
-		const vks_vertex v[6] = {
-			{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
-			{x0 + 1.f, y0, 0.f, 0.f, cr, cg, cb, ca},
-			{x0 + 1.f, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
-			{x0, y0, 0.f, 0.f, cr, cg, cb, ca},
-			{x0 + 1.f, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
-			{x0, y0 + 1.f, 0.f, 0.f, cr, cg, cb, ca},
-		};
-		if (!vks_prepare_2d())
-			return;
-		vks_emit(vk_white_descriptor_set, v, 6);
-		return;
-	}
-	/* Unit perpendicular, half-width 0.5 => 1px-thick line. */
-	const float px = -dy / len * 0.5f;
-	const float py = dx / len * 0.5f;
+	/* Unit direction (any direction for a degenerate line) and its
+	 * perpendicular. The quad extends half a line width past both endpoints
+	 * so the end pixels are covered, matching the inclusive software line. */
+	const float ux = len < 0.5f ? 1.f : dx / len;
+	const float uy = len < 0.5f ? 0.f : dy / len;
+	const float ex = ux * half, ey = uy * half;
+	const float px = -uy * half, py = ux * half;
+	const float ax = x0 - ex, ay = y0 - ey;
+	const float bx = x1 + ex, by = y1 + ey;
 	const vks_vertex v[6] = {
-		{x0 + px, y0 + py, 0.f, 0.f, cr, cg, cb, ca},
-		{x1 + px, y1 + py, 0.f, 0.f, cr, cg, cb, ca},
-		{x1 - px, y1 - py, 0.f, 0.f, cr, cg, cb, ca},
-		{x0 + px, y0 + py, 0.f, 0.f, cr, cg, cb, ca},
-		{x1 - px, y1 - py, 0.f, 0.f, cr, cg, cb, ca},
-		{x0 - px, y0 - py, 0.f, 0.f, cr, cg, cb, ca},
+		{ax + px, ay + py, 0.f, 0.f, cr, cg, cb, ca},
+		{bx + px, by + py, 0.f, 0.f, cr, cg, cb, ca},
+		{bx - px, by - py, 0.f, 0.f, cr, cg, cb, ca},
+		{ax + px, ay + py, 0.f, 0.f, cr, cg, cb, ca},
+		{bx - px, by - py, 0.f, 0.f, cr, cg, cb, ca},
+		{ax - px, ay - py, 0.f, 0.f, cr, cg, cb, ca},
 	};
 	if (!vks_prepare_2d())
 		return;
@@ -472,12 +483,15 @@ void _g3_draw_poly(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 		return;
 	if (!vks_prepare_3d(canvas))
 		return;
-	/* Flat-shaded: every vertex gets the palette color; UVs unused (white tex). */
-	const float cr = CPAL2Tr(color), cg = CPAL2Tg(color), cb = CPAL2Tb(color);
+	/* Flat-shaded: every vertex gets the palette color (gr_palette, as the
+	 * OpenGL PAL2T) and the canvas fade alpha (cloaked walls); UVs unused. */
+	const auto &rgb = gr_palette[color];
+	const float cr = rgb.r / 63.0f, cg = rgb.g / 63.0f, cb = rgb.b / 63.0f;
+	const float ca = vks_fade_alpha(canvas);
 	std::array<vks_vertex3d, MAX_POINTS_PER_POLY> verts;
 	for (uint32_t i = 0; i < nv; i++) {
 		const auto &pv = pointlist[i]->p3_vec;
-		verts[i] = {f2fl(pv.x), f2fl(pv.y), f2fl(pv.z), 0.f, 0.f, cr, cg, cb, 1.f};
+		verts[i] = {f2fl(pv.x), f2fl(pv.y), f2fl(pv.z), 0.f, 0.f, cr, cg, cb, ca};
 	}
 	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(nv));
 }
@@ -488,21 +502,33 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 	if (nv < 3 || nv > MAX_POINTS_PER_POLY)
 		return;
 
-	/* On-demand upload (mirrors ogl_bindbmtex): the live texture hangs off the
-	 * root bitmap after the upload walks the parent chain. */
-	grs_bitmap *root = &bm;
-	while (root->bm_parent)
-		root = root->bm_parent;
-	if (!root->vktexture)
-		vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
-	vks_texture *tex = root->vktexture;
-	if (!tex)
+	/* draw_tmap => textured; draw_tmap_flat => untextured black silhouette
+	 * for cloaked faces. Any other drawer is unsupported, as in OpenGL. */
+	const bool textured = (tmap_drawer_ptr == draw_tmap);
+	if (!textured && tmap_drawer_ptr != draw_tmap_flat)
 		return;
+	VkDescriptorSet ds = vk_white_descriptor_set;
+	float alpha;
+	if (textured)
+	{
+		/* On-demand upload (mirrors ogl_bindbmtex): the live texture hangs
+		 * off the root bitmap after the upload walks the parent chain. */
+		grs_bitmap *root = &bm;
+		while (root->bm_parent)
+			root = root->bm_parent;
+		if (!root->vktexture)
+			vks_loadbmtexture_f(bm, vulkan_texture_filter::classic, false, false);
+		vks_texture *tex = root->vktexture;
+		if (!tex)
+			return;
+		ds = tex->descriptor_set;
+		alpha = vks_fade_alpha(canvas);
+	}
+	else
+		alpha = 1.0f - static_cast<float>(canvas.cv_fade_level) / static_cast<float>(NUM_LIGHTING_LEVELS);
 	if (!vks_prepare_3d(canvas))
 		return;
 
-	/* draw_tmap => textured; anything else (draw_tmap_flat) => cloaked/flat. */
-	const bool textured = (tmap_drawer_ptr == draw_tmap);
 	const bool no_light = bm.get_flag_mask(BM_FLAG_NO_LIGHTING);
 	std::array<vks_vertex3d, MAX_POINTS_PER_POLY> verts;
 	for (uint32_t i = 0; i < nv; i++) {
@@ -522,9 +548,9 @@ void _g3_draw_tmap(grs_canvas &canvas, std::span<g3_draw_tmap_point *const> poin
 			vt.g = f2fl(light_rgb[i].g);
 			vt.b = f2fl(light_rgb[i].b);
 		}
-		vt.a = 1.f;
+		vt.a = alpha;
 	}
-	vks_emit_3d(tex->descriptor_set, verts.data(), static_cast<uint32_t>(nv));
+	vks_emit_3d(ds, verts.data(), static_cast<uint32_t>(nv));
 }
 
 void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint8_t color)
@@ -539,14 +565,20 @@ void g3_draw_sphere(grs_canvas &canvas, g3_draw_sphere_point &pnt, fix rad, uint
 	const float cx = f2fl(pnt.p3_vec.x);
 	const float cy = f2fl(pnt.p3_vec.y);
 	const float cz = f2fl(pnt.p3_vec.z);
-	const float r = f2fl(fixmul(rad, Matrix_scale.x));
+	/* The projection maps view x across the canvas width and y across its
+	 * height, so correct the radii by the canvas aspect to draw a round disc,
+	 * exactly as the OpenGL g3_draw_sphere's glScalef(gl1, gl2, ...). */
+	const float scale = static_cast<float>(canvas.cv_bitmap.bm_w) / static_cast<float>(canvas.cv_bitmap.bm_h);
+	const float rad_f = f2fl(rad);
+	const float rx = scale >= 1.0f ? rad_f / scale : rad_f;
+	const float ry = scale >= 1.0f ? rad_f : rad_f * scale;
 	const float cr = CPAL2Tr(color), cg = CPAL2Tg(color), cb = CPAL2Tb(color);
 	constexpr unsigned nsides = 20;
 	std::array<vks_vertex3d, nsides + 2> verts;
 	verts[0] = {cx, cy, cz, 0.f, 0.f, cr, cg, cb, 1.f};
 	for (unsigned i = 0; i <= nsides; ++i) {
 		const float ang = 2.0f * 3.14159265358979323846f * static_cast<float>(i) / static_cast<float>(nsides);
-		verts[i + 1] = {cx + r * cosf(ang), cy + r * sinf(ang), cz, 0.f, 0.f, cr, cg, cb, 1.f};
+		verts[i + 1] = {cx + rx * cosf(ang), cy + ry * sinf(ang), cz, 0.f, 0.f, cr, cg, cb, 1.f};
 	}
 	vks_emit_3d(vk_white_descriptor_set, verts.data(), static_cast<uint32_t>(verts.size()));
 }
@@ -617,8 +649,7 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	 * vertex colour: the sprite texture carries its own colour (no lighting
 	 * modulation). +y viewer = up on screen; v=0 is the top row of the bitmap,
 	 * so the sprite appears upright. Triangle fan: TL, TR, BR, BL. */
-	const float alpha = canvas.cv_fade_level >= GR_FADE_OFF ? 1.0f
-		: (1.0f - static_cast<float>(canvas.cv_fade_level) / (static_cast<float>(GR_FADE_LEVELS) - 1.0f));
+	const float alpha = vks_fade_alpha(canvas);
 	const vks_vertex3d verts[4] = {
 		{cx - w, cy + h, cz, u0, v0, 1.f, 1.f, 1.f, alpha},
 		{cx + w, cy + h, cz, u1, v0, 1.f, 1.f, 1.f, alpha},
