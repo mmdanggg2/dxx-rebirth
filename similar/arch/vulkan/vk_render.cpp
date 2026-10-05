@@ -259,6 +259,25 @@ bool vks_ubitmapm_cs(grs_canvas &canvas, int x0, int y0, int dw, int dh, grs_bit
 	return vks_ubitmapm_cs(canvas, x0, y0, dw, dh, bm, c);
 }
 
+/* Emit a screen-aligned textured quad covering [xa,xb)x[ya,yb) in absolute
+ * pixel coordinates with texture coordinates [u0,u1]x[v0,v1]. */
+static bool vks_draw_textured_quad(VkDescriptorSet ds, const float xa, const float ya, const float xb, const float yb, const float u0, const float v0, const float u1, const float v1, const vks_colors::array_type &color_array)
+{
+	const float cr = color_array[0], cg = color_array[1], cb = color_array[2], ca = color_array[3];
+	const vks_vertex verts[6] = {
+		{xa, ya, u0, v0, cr, cg, cb, ca},
+		{xb, ya, u1, v0, cr, cg, cb, ca},
+		{xb, yb, u1, v1, cr, cg, cb, ca},
+		{xa, ya, u0, v0, cr, cg, cb, ca},
+		{xb, yb, u1, v1, cr, cg, cb, ca},
+		{xa, yb, u0, v1, cr, cg, cb, ca},
+	};
+	if (!vks_prepare_2d())
+		return false;
+	vks_emit(ds, verts, 6);
+	return true;
+}
+
 bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int dw, const int dh, grs_bitmap &bm, const vks_colors::array_type &color_array)
 {
 	/* Upload on demand (mirrors ogl_bindbmtex). The upload walks to the root
@@ -291,59 +310,23 @@ bool vks_ubitmapm_cs(grs_canvas &canvas, const int x0, const int y0, const int d
 	const float v0 = bm.bm_y / th;
 	const float v1 = (bm.bm_y + bm.bm_h) / th;
 
-	const float cr = color_array[0], cg = color_array[1], cb = color_array[2], ca = color_array[3];
-	const vks_vertex verts[6] = {
-		{xa, ya, u0, v0, cr, cg, cb, ca},
-		{xb, ya, u1, v0, cr, cg, cb, ca},
-		{xb, yb, u1, v1, cr, cg, cb, ca},
-		{xa, ya, u0, v0, cr, cg, cb, ca},
-		{xb, yb, u1, v1, cr, cg, cb, ca},
-		{xa, yb, u0, v1, cr, cg, cb, ca},
-	};
-	if (!vks_prepare_2d())
-		return false;
-	vks_emit(tex->descriptor_set, verts, 6);
-	return true;
+	return vks_draw_textured_quad(tex->descriptor_set, xa, ya, xb, yb, u0, v0, u1, v1, color_array);
 }
 
-bool vks_ubitblt_cs(grs_canvas &canvas, int dw, int dh, int dx, int dy, int sx, int sy)
-{
-	(void)canvas;
-	(void)dw;
-	(void)dh;
-	(void)dx;
-	(void)dy;
-	(void)sx;
-	(void)sy;
-	return true;
-}
-
+/* Blit the `sw`x`sh` region of `src` at (`sx`,`sy`) scaled to `dw`x`dh` at
+ * (`dx`,`dy`) of `dest`. Like ogl_ubitblt_i, the source is uploaded to a
+ * scratch texture through gr_current_pal on every call (movie frames and other
+ * bitmaps whose pixels change between draws), released after the frame. */
 bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned sw, unsigned sh, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest, vulkan_texture_filter /*texfilt*/)
 {
-	(void)dw;
-	(void)dh;
-	(void)dx;
-	(void)dy;
-	(void)sw;
-	(void)sh;
-	(void)sx;
-	(void)sy;
-	(void)src;
-	(void)dest;
-	return true;
-}
-
-bool vks_ubitblt(unsigned w, unsigned h, unsigned dx, unsigned dy, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest)
-{
-	(void)w;
-	(void)h;
-	(void)dx;
-	(void)dy;
-	(void)sx;
-	(void)sy;
-	(void)src;
-	(void)dest;
-	return true;
+	vks_texture *const tex = vks_load_temporary_texture(src, sx, sy, sw, sh);
+	if (!tex)
+		return false;
+	const float xa = static_cast<float>(dx + dest.bm_x);
+	const float ya = static_cast<float>(dy + dest.bm_y);
+	const bool drawn = vks_draw_textured_quad(tex->descriptor_set, xa, ya, xa + dw, ya + dh, 0.f, 0.f, 1.f, 1.f, vks_colors::white);
+	vks_free_texture(*tex);
+	return drawn;
 }
 
 /* Line drawing */
@@ -659,18 +642,13 @@ void g3_draw_bitmap(grs_canvas &canvas, const vms_vector &pos, const fix iwidth,
 	vks_emit_3d(tex->descriptor_set, verts, 4);
 }
 
-/* 2D drawing stubs */
+/* 2D bitmap drawing */
 void gr_ubitmapm(grs_canvas &canvas, unsigned x, unsigned y, grs_bitmap &bm)
 {
 	/* Masked bitmap blit at native size (gauge icons, weapon indicators).
 	 * Delegates to the textured-quad blit; color-key transparency (alpha-0
 	 * discard in the fragment shader) handles the masked pixels. */
 	vks_ubitmapm_cs(canvas, static_cast<int>(x), static_cast<int>(y), 0, 0, bm, vks_colors::white);
-}
-
-void gr_bitmapm(grs_canvas &canvas, unsigned x, unsigned y, const grs_bitmap &bm)
-{
-	(void)canvas; (void)x; (void)y; (void)bm;
 }
 
 int gr_ucircle(grs_canvas &, fix, fix, fix, color_palette_index)

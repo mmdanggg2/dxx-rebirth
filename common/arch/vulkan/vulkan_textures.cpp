@@ -309,62 +309,33 @@ static uint32_t find_host_visible_memory_type(VkMemoryRequirements requirements)
 	Error(__FILE__, __LINE__, __func__, "Vulkan: No suitable host-visible memory type for staging buffer");
 }
 
-void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool /*texanis*/, bool /*edgepad*/)
+/* Expand `w`x`h` paletted pixels (row stride `rowsize`) into RGBA via `pal`
+ * and upload them into `tex` through a host-visible staging buffer. Mirrors
+ * ogl_filltexbuf: index 255 with BM_FLAG_TRANSPARENT and index 254 with
+ * BM_FLAG_SUPER_TRANSPARENT become fully transparent; everything else maps
+ * through the palette (entries are 0..63, scaled by 4). */
+static void vks_upload_paletted(vks_texture &tex, const uint8_t *src, const uint32_t rowsize, const uint32_t w, const uint32_t h, const uint8_t bmflags, const palette_array_t &pal)
 {
-	/* Sub-bitmaps reference their parent's pixel data; upload from the root, as
-	 * ogl_loadbmtexture_f does. */
-	grs_bitmap *root = &bm;
-	while (root->bm_parent)
-		root = root->bm_parent;
-
-	const uint32_t w = root->bm_w;
-	const uint32_t h = root->bm_h;
-	const uint8_t bmflags = root->get_flags();
-
-	/* RLE-compressed bitmaps (BM_FLAG_RLE) store a packed run-length stream,
-	 * not linear paletted pixels — decode to linear first, exactly as
-	 * ogl_loadbmtexture_f does. The decode buffer must outlive the RGBA
-	 * expansion below. */
-	std::array<uint8_t, 300 * 1024> decodebuf;
-	const uint8_t *src;
-	if (root->get_flag_mask(BM_FLAG_RLE)) {
-		decodebuf = {};
-		if (!bm_rle_expand(*root).loop(w, bm_rle_expand_range{decodebuf}))
-			con_printf(CON_URGENT, "Vulkan: insufficient space to decode %ux%u bitmap", w, h);
-		src = decodebuf.data();
-	} else {
-		src = root->get_bitmap_data();
-	}
-
-	vks_texture *tex = vks_get_free_texture();
-	if (!vks_init_texture(*tex, w, h, 0))
-		return;	/* slot already returned by vks_destroy_texture; leave bm.vktexture null so the draw skips */
-
-	/* Expand paletted (1 byte/pixel) source into RGBA via gr_palette -- the
-	 * selected game/art palette (set by gr_use_palette_table / the PCX loader),
-	 * NOT the bound gr_current_pal, which lags until gr_palette_load. This
-	 * mirrors ogl_loadtexture(gr_palette, ...) so fullscreen bitmaps uploaded
-	 * before their gr_palette_load (briefing/title screens) get the right
-	 * colours. Mirrors ogl_filltexbuf: index 255 with BM_FLAG_TRANSPARENT and
-	 * index 254 with BM_FLAG_SUPER_TRANSPARENT become fully transparent;
-	 * everything else maps through gr_palette (entries are 0..63, scaled by 4). */
 	const uint32_t pixelCount = w * h;
 	std::vector<uint8_t> rgba(static_cast<size_t>(pixelCount) * 4);
 	uint8_t *out = rgba.data();
-	for (uint32_t i = 0; i < pixelCount; i++) {
-		const uint8_t c = src[i];
-		if (c == 254 && (bmflags & BM_FLAG_SUPER_TRANSPARENT)) {
-			out[0] = 255; out[1] = 255; out[2] = 255; out[3] = 0;
-		} else if (c == 255 && (bmflags & BM_FLAG_TRANSPARENT)) {
-			out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
-		} else {
-			const rgb_t &col = gr_palette[c];
-			out[0] = col.r * 4;
-			out[1] = col.g * 4;
-			out[2] = col.b * 4;
-			out[3] = 255;
+	for (uint32_t y = 0; y < h; y++) {
+		const uint8_t *row = src + static_cast<size_t>(y) * rowsize;
+		for (uint32_t x = 0; x < w; x++) {
+			const uint8_t c = row[x];
+			if (c == 254 && (bmflags & BM_FLAG_SUPER_TRANSPARENT)) {
+				out[0] = 255; out[1] = 255; out[2] = 255; out[3] = 0;
+			} else if (c == 255 && (bmflags & BM_FLAG_TRANSPARENT)) {
+				out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+			} else {
+				const rgb_t &col = pal[c];
+				out[0] = col.r * 4;
+				out[1] = col.g * 4;
+				out[2] = col.b * 4;
+				out[3] = 255;
+			}
+			out += 4;
 		}
-		out += 4;
 	}
 
 	/* Upload the RGBA data through a host-visible staging buffer. */
@@ -401,11 +372,52 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 	std::memcpy(data, rgba.data(), imageSize);
 	vkUnmapMemory(vk_device, stagingMemory);
 
-	copyBufferToImage(stagingBuffer, tex->image, w, h);
+	copyBufferToImage(stagingBuffer, tex.image, w, h);
 
 	/* Staging resources are no longer needed once the upload completed. */
 	vkDestroyBuffer(vk_device, stagingBuffer, nullptr);
 	vkFreeMemory(vk_device, stagingMemory, nullptr);
+}
+
+void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool /*texanis*/, bool /*edgepad*/)
+{
+	/* Sub-bitmaps reference their parent's pixel data; upload from the root, as
+	 * ogl_loadbmtexture_f does. */
+	grs_bitmap *root = &bm;
+	while (root->bm_parent)
+		root = root->bm_parent;
+
+	const uint32_t w = root->bm_w;
+	const uint32_t h = root->bm_h;
+
+	/* RLE-compressed bitmaps (BM_FLAG_RLE) store a packed run-length stream,
+	 * not linear paletted pixels — decode to linear first, exactly as
+	 * ogl_loadbmtexture_f does. The decode buffer must outlive the RGBA
+	 * expansion below. */
+	std::array<uint8_t, 300 * 1024> decodebuf;
+	const uint8_t *src;
+	uint32_t rowsize;
+	if (root->get_flag_mask(BM_FLAG_RLE)) {
+		decodebuf = {};
+		if (!bm_rle_expand(*root).loop(w, bm_rle_expand_range{decodebuf}))
+			con_printf(CON_URGENT, "Vulkan: insufficient space to decode %ux%u bitmap", w, h);
+		src = decodebuf.data();
+		rowsize = w;
+	} else {
+		src = root->get_bitmap_data();
+		rowsize = root->bm_rowsize;
+	}
+
+	vks_texture *tex = vks_get_free_texture();
+	if (!vks_init_texture(*tex, w, h, 0))
+		return;	/* slot already returned by vks_destroy_texture; leave bm.vktexture null so the draw skips */
+
+	/* Bake through gr_palette -- the selected game/art palette (set by
+	 * gr_use_palette_table / the PCX loader), NOT the bound gr_current_pal,
+	 * which lags until gr_palette_load. This mirrors
+	 * ogl_loadtexture(gr_palette, ...) so fullscreen bitmaps uploaded before
+	 * their gr_palette_load (briefing/title screens) get the right colours. */
+	vks_upload_paletted(*tex, src, rowsize, w, h, root->get_flags(), gr_palette);
 
 	/* Attach the texture to the root bitmap. The bitmap stays bm_mode::linear —
 	 * the 2D blit dispatch (e.g. show_fullscr) selects the Vulkan path from the
@@ -415,36 +427,47 @@ void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter /*texfilt*/, bool
 	tex->numrend++;
 }
 
-void vks_freebmtexture(grs_bitmap &bm)
+vks_texture *vks_load_temporary_texture(const grs_bitmap &src, const uint32_t sx, const uint32_t sy, const uint32_t w, const uint32_t h)
 {
-	vks_texture *tex = bm.vktexture;
-	if (!tex)
-		return;
+	vks_texture *tex = vks_get_free_texture();
+	if (!vks_init_texture(*tex, w, h, 0))
+		return nullptr;
+	const uint32_t rowsize = src.bm_rowsize;
+	vks_upload_paletted(*tex, src.get_bitmap_data() + static_cast<size_t>(sy) * rowsize + sx, rowsize, w, h, src.get_flags(), gr_current_pal);
+	return tex;
+}
+
+void vks_free_texture(vks_texture &tex)
+{
 	/* The device is gone: static destructors (e.g. ~Gamefonts) run during
 	 * exit(), after gr_close/vks_shutdown already tore Vulkan down. The
-	 * texture's Vulkan resources were freed by shutdown; just drop the
-	 * dangling reference and let the OS reclaim the rest. */
+	 * texture's Vulkan resources were freed by shutdown. */
 	if (!vk_device)
-	{
-		bm.vktexture = nullptr;
 		return;
-	}
-	/* Detach immediately so the bitmap will re-upload on next use rather than
-	 * keep serving the about-to-be-destroyed texture. */
-	bm.vktexture = nullptr;
 	if (vks_is_frame_recording())
 	{
 		/* A command buffer is open and/or another is in flight; the descriptor
 		 * set may still be referenced. Defer destruction to the next frame
 		 * begin, where the fence wait guarantees all referencing command
 		 * buffers have completed. */
-		pending_free[vk_current_frame % VKS_PENDING_SLOTS].push_back(tex);
+		pending_free[vk_current_frame % VKS_PENDING_SLOTS].push_back(&tex);
 		return;
 	}
 	/* Outside the frame loop (e.g. level load): no command buffer is recording.
 	 * Wait for in-flight submissions, then destroy at once. */
 	vkDeviceWaitIdle(vk_device);
-	vks_destroy_texture(tex);
+	vks_destroy_texture(&tex);
+}
+
+void vks_freebmtexture(grs_bitmap &bm)
+{
+	vks_texture *tex = bm.vktexture;
+	if (!tex)
+		return;
+	/* Detach immediately so the bitmap will re-upload on next use rather than
+	 * keep serving the about-to-be-destroyed texture. */
+	bm.vktexture = nullptr;
+	vks_free_texture(*tex);
 }
 
 /* Drain pending texture destruction for `frame`. Called from vks_begin_frame

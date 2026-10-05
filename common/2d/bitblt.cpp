@@ -181,6 +181,10 @@ void gr_ubitmap(grs_canvas &canvas, grs_bitmap &bm)
 		case bm_mode::ogl:
 			ogl_ubitmapm_cs(canvas, x, y, opengl_bitmap_use_dst_canvas, opengl_bitmap_use_dst_canvas, bm, ogl_colors::white);
 			return;
+#elif DXX_USE_VULKAN
+		case bm_mode::vulkan:
+			vks_ubitmapm_cs(canvas, x, y, vulkan_bitmap_use_dst_canvas, vulkan_bitmap_use_dst_canvas, bm, vks_colors::white);
+			return;
 #endif
 		default:
 			gr_ubitmap012(canvas, x, y, bm);
@@ -291,14 +295,7 @@ void gr_bitmap(grs_canvas &canvas, const unsigned x, const unsigned y, grs_bitma
 #if DXX_USE_OGL
 	ogl_ubitmapm_cs(canvas, x, y, opengl_bitmap_use_src_bitmap, opengl_bitmap_use_src_bitmap, bm, ogl_colors::white);
 #elif DXX_USE_VULKAN
-	{
-		int sx{0}, sy{0};
-		if (dx1 < 0) { sx = -dx1; dx1 = 0; }
-		if (dy1 < 0) { sy = -dy1; dy1 = 0; }
-		if (dx2 >= canvas.cv_bitmap.bm_w) dx2 = canvas.cv_bitmap.bm_w - 1;
-		if (dy2 >= canvas.cv_bitmap.bm_h) dy2 = canvas.cv_bitmap.bm_h - 1;
-		vks_ubitblt(dx2 - dx1 + 1, dy2 - dy1 + 1, dx1, dy1, sx, sy, bm, canvas.cv_bitmap);
-	}
+	vks_ubitmapm_cs(canvas, x, y, 0, 0, bm, vks_colors::white);
 #else
 	int sx{0}, sy = 0;
 	if ( dx1 < 0 )

@@ -192,9 +192,7 @@ void vks_urect(grs_canvas &, int left, int top, int right, int bot, color_palett
 bool vks_ubitmapm_cs(grs_canvas &, int x, int y, int dw, int dh, grs_bitmap &bm, int c);
 bool vks_ubitmapm_cs(grs_canvas &, int x, int y, int dw, int dh, grs_bitmap &bm, const vks_colors::array_type &c);
 bool vks_ubitmapm_cs(grs_canvas &, int x, int y, int dw, int dh, grs_bitmap &bm, const vks_colors::array_type &c, bool fill);
-bool vks_ubitblt_cs(grs_canvas &, int dw, int dh, int dx, int dy, int sx, int sy);
 bool vks_ubitblt_i(unsigned dw, unsigned dh, unsigned dx, unsigned dy, unsigned sw, unsigned sh, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest, vulkan_texture_filter texfilt);
-bool vks_ubitblt(unsigned w, unsigned h, unsigned dx, unsigned dy, unsigned sx, unsigned sy, const grs_bitmap &src, grs_bitmap &dest);
 void vks_upixelc(const grs_bitmap &, unsigned x, unsigned y, color_palette_index c);
 color_palette_index vks_ugpixel(const grs_bitmap &bitmap, unsigned x, unsigned y);
 void vks_ulinec(grs_canvas &, int left, int top, int right, int bot, int c);

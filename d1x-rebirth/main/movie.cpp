@@ -159,7 +159,10 @@ void MovieShowFrame(const uint8_t *buf, int dstx, int dsty, int bufw, int bufh, 
 
 	glEnable (GL_BLEND);
 #elif DXX_USE_VULKAN
-	vks_ubitblt(bufw*scale, bufh*scale, dstx, dsty, 0, 0, source_bm, grd_curcanv->cv_bitmap);
+	vks_ubitblt_i(
+		bufw*scale, bufh*scale,
+		dstx, dsty,
+		bufw, bufh, 0, 0, source_bm, grd_curcanv->cv_bitmap, vulkan_texture_filter::classic);
 #else
 	{
 		const int dstw = static_cast<int>(bufw * scale);

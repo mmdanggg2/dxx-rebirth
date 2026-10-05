@@ -68,6 +68,12 @@ enum class vulkan_texture_filter : uint8_t
 vks_texture* vks_get_free_texture();
 bool vks_init_texture(vks_texture &t, uint32_t w, uint32_t h, int flags);
 void vks_loadbmtexture_f(grs_bitmap &bm, vulkan_texture_filter texfilt, bool texanis, bool edgepad);
+/* Upload the `w`x`h` region of `src` at (`sx`,`sy`) through gr_current_pal
+ * into a texture not attached to any bitmap (the Vulkan counterpart of the
+ * scratch texture in ogl_ubitblt_i). Release it with vks_free_texture. */
+vks_texture *vks_load_temporary_texture(const grs_bitmap &src, uint32_t sx, uint32_t sy, uint32_t w, uint32_t h);
+/* Destroy a texture once no recorded or in-flight frame can reference it. */
+void vks_free_texture(vks_texture &tex);
 void vks_freebmtexture(grs_bitmap &bm);
 /* Drain deferred texture destruction for a frame slot (call at frame begin). */
 void vks_flush_pending_texture_frees(uint32_t frame);
