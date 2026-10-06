@@ -777,11 +777,14 @@ void g3_draw_line(const g3_draw_line_context &context, g3_draw_line_point &p0, g
 {
 	/* 3D wireframe line. Endpoints arrive as rotated viewer-space points
 	 * (p3_vec); emit them through the 3D pipeline as a LINE_LIST, mirroring
-	 * the OpenGL backend's GL_LINES. The per-vertex colour is pre-baked in
-	 * context.color_array by g3_draw_line_colors. */
+	 * the OpenGL backend's GL_LINES at glLineWidth(linedotscale). The
+	 * per-vertex colour is pre-baked in context.color_array by
+	 * g3_draw_line_colors. */
 	if (!vks_prepare_3d(context.canvas))
 		return;
-	vkCmdBindPipeline(vks_get_command_buffer(), VK_PIPELINE_BIND_POINT_GRAPHICS, vks_get_3d_pipeline(vks_3d_pipeline_kind::line));
+	const VkCommandBuffer cmd = vks_get_command_buffer();
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vks_get_3d_pipeline(vks_3d_pipeline_kind::line));
+	vkCmdSetLineWidth(cmd, std::min(vks_linedotscale(), vk_max_line_width));
 	const auto &ca = context.color_array;
 	const vks_vertex3d verts[2] = {
 		{f2fl(p0.p3_vec.x), f2fl(p0.p3_vec.y), f2fl(p0.p3_vec.z), 0.f, 0.f, ca[0], ca[1], ca[2], 1.f},

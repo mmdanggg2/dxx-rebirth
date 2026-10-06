@@ -43,6 +43,7 @@ std::vector<VkImage> vk_swapchain_images;
 
 uint32_t vk_graphics_queue_family;
 float vk_max_sampler_anisotropy;
+float vk_max_line_width = 1.0f;
 VkExtent2D vk_surface_extent;
 VkSampleCountFlagBits vk_msaa_samples = VK_SAMPLE_COUNT_1_BIT;
 VkFormat vk_swapchain_format;
@@ -215,19 +216,17 @@ static void createDevice()
 	queueCreateInfo.queueCount = 1;
 	queueCreateInfo.pQueuePriorities = &queuePriority;
 
-	/* Enable anisotropic filtering only where the device offers it. */
+	/* Enable anisotropic filtering and wide lines only where the device
+	 * offers them. */
 	VkPhysicalDeviceFeatures supported{};
 	vkGetPhysicalDeviceFeatures(vk_physical_device, &supported);
+	VkPhysicalDeviceProperties props{};
+	vkGetPhysicalDeviceProperties(vk_physical_device, &props);
 	VkPhysicalDeviceFeatures deviceFeatures{};
 	deviceFeatures.samplerAnisotropy = supported.samplerAnisotropy;
-	if (supported.samplerAnisotropy)
-	{
-		VkPhysicalDeviceProperties props{};
-		vkGetPhysicalDeviceProperties(vk_physical_device, &props);
-		vk_max_sampler_anisotropy = props.limits.maxSamplerAnisotropy;
-	}
-	else
-		vk_max_sampler_anisotropy = 0;
+	vk_max_sampler_anisotropy = supported.samplerAnisotropy ? props.limits.maxSamplerAnisotropy : 0;
+	deviceFeatures.wideLines = supported.wideLines;
+	vk_max_line_width = supported.wideLines ? props.limits.lineWidthRange[1] : 1.0f;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1111,6 +1110,16 @@ void vks_init_pipeline()
 		stages[0].pName = "main";
 		stages[1] = fragStage;
 
+		/* The line pipeline takes its width per draw (glLineWidth). */
+		constexpr std::array<VkDynamicState, 3> lineDynamicStates{{
+			VK_DYNAMIC_STATE_VIEWPORT,
+			VK_DYNAMIC_STATE_SCISSOR,
+			VK_DYNAMIC_STATE_LINE_WIDTH,
+		}};
+		VkPipelineDynamicStateCreateInfo lineDynamicState{dynamicState};
+		lineDynamicState.dynamicStateCount = static_cast<uint32_t>(lineDynamicStates.size());
+		lineDynamicState.pDynamicStates = lineDynamicStates.data();
+
 		/* Build a 3D pipeline with the given colour blend factors, with or
 		 * without depth testing (ogl_toggle_depth_test; disabling the test in
 		 * OpenGL also disables depth writes). Depth config is otherwise
@@ -1152,7 +1161,7 @@ void vks_init_pipeline()
 			info.pMultisampleState = &multisampling;
 			info.pColorBlendState = &cb;
 			info.pDepthStencilState = &depthStencil;
-			info.pDynamicState = &dynamicState;
+			info.pDynamicState = topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ? &lineDynamicState : &dynamicState;
 			info.layout = vk_2d_pipeline_layout;
 			info.renderPass = vk_render_pass;
 			info.subpass = 0;
