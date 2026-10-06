@@ -48,6 +48,7 @@
 #include "game.h"
 #elif DXX_USE_VULKAN
 #include "vulkan_init.h"
+#include "game.h"
 #endif
 #include "args.h"
 
@@ -365,7 +366,7 @@ movie_play_status RunMovie(const char *const filename, const int hires_flag, con
 	const auto reshow{hide_menus()};
 	auto wind{window_create<movie>(grd_curscreen->sc_canvas, std::move(mvestream))};
 
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	set_screen_mode(SCREEN_MOVIE);
 	const palette_array_t pal_save{gr_palette};
 	gr_palette_load(gr_palette);
@@ -384,7 +385,7 @@ movie_play_status RunMovie(const char *const filename, const int hires_flag, con
 	// Restore old graphic state
 
 	Screen_mode=-1;  //force reset of screen mode
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	gr_palette = pal_save;
 	reset_computed_colors();
 	gr_palette_load(pal_save);
