@@ -342,13 +342,11 @@ window_event_result standard_handler(const d_event &event)
 						 * smaller, part of the game is outside the
 						 * cropped area.
 						 *
-						 * If the automap is open, the view is still
-						 * wrong, since the automap uses its own private
-						 * canvas.  That will need to be fixed
-						 * separately.  Ideally, the whole window
-						 * system would be reworked to provide a general
-						 * notification to every interested canvas when
-						 * the top level window resizes.
+						 * The automap resizes its own canvases on
+						 * event_type::window_resize.  Ideally, the whole
+						 * window system would be reworked to provide a
+						 * general notification to every interested canvas
+						 * when the top level window resizes.
 						 */
 						auto sm = Screen_mode;
 						Screen_mode = SCREEN_GAME;

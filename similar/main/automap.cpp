@@ -1236,6 +1236,9 @@ window_event_result automap::event_handler(const d_event &event)
 
 #if SDL_MAJOR_VERSION == 2
 		case event_type::window_resize:
+			/* The background, title and help text draw into the window's
+			 * own canvas, sized when the automap opened. */
+			gr_init_sub_canvas(w_canv, grd_curscreen->sc_canvas, 0, 0, SWIDTH, SHEIGHT);
 			init_automap_subcanvas(automap_view, grd_curscreen->sc_canvas);
 			break;
 #endif
