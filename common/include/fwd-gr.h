@@ -147,7 +147,7 @@ int gr_set_mode(screen_mode mode);
 void gr_set_mode_from_window_size();
 
 int gr_init();
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 void gr_set_attributes();
 #endif
 void gr_close();

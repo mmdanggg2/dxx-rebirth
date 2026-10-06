@@ -1493,6 +1493,9 @@ int main(int argc,char**argv)
 		if user_settings.vulkan and not user_settings.sdl2:
 			Result('ERROR: Vulkan renderer requires SDL2. Set sdl2=1 to enable Vulkan.')
 			raise SCons.Errors.StopError('Vulkan renderer requires SDL2.')
+		if user_settings.vulkan and user_settings.use_stereo_render:
+			Result('ERROR: Stereoscopic rendering is not implemented for the Vulkan renderer. Set use_stereo_render=0 to enable Vulkan.')
+			raise SCons.Errors.StopError('Stereoscopic rendering is not implemented for the Vulkan renderer.')
 		_define_macro(context, 'DXX_USE_VULKAN', int(user_settings.vulkan))
 		Result(f'{self.msgprefix}: building with {"Vulkan" if user_settings.vulkan else "no Vulkan renderer"}')
 

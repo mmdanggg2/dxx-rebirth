@@ -217,25 +217,17 @@ int gr_set_mode(screen_mode mode)
 	gamefont_choose_game_font(w, h);
 	gr_remap_color_fonts();
 
-#if DXX_USE_STEREOSCOPIC_RENDER
-	// gr_set_stereo_mode_sync();
-#endif
-
 	return 0;
 }
 
+/* Apply changed graphics settings, as the OpenGL gr_set_attributes does:
+ * VSync and multisampling take effect when the caller's gr_set_mode
+ * rebuilds the swapchain; textures are released so they re-upload with the
+ * current filtering (ogl_smash_texture_list_internal). */
 void gr_set_attributes(void)
 {
-	/* Vulkan doesn't use SDL GL attributes, but we set window flags */
-	/* TODO: Apply these flags when creating the Vulkan window */
-	(void)SDL_WINDOW_VULKAN;
-	if (CGameArg.SysNoBorders)
-		(void)SDL_WINDOW_BORDERLESS;
-	if (!CGameCfg.WindowMode && !CGameArg.SysWindow)
-		(void)SDL_WINDOW_FULLSCREEN_DESKTOP;
-#if defined(__APPLE__) && defined(__MACH__)
-	(void)SDL_WINDOW_ALLOW_HIGHDPI;
-#endif
+	vks_release_bitmap_textures();
+	gr_remap_color_fonts();
 }
 
 void gr_close()

@@ -2090,12 +2090,11 @@ void hud_config()
 	DXX_MENUITEM(VERB, TEXT, "", blank1)	\
 	DXX_OGL0_GRAPHICS_MENU(VERB)	\
 	DXX_OGL1_GRAPHICS_MENU(VERB)	\
-	DXX_VULKAN_GRAPHICS_MENU(VERB)	\
 	DXX_MENUITEM(VERB, CHECK, "FPS Counter", opt_gr_fpsindi, CGameCfg.FPSIndicator)	\
 
 struct graphics_config_menu_items
 {
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	enum {
 		optgrp_texfilt,
 	};
@@ -2120,17 +2119,10 @@ struct graphics_config_menu_items
 #define D2X_OGL_GRAPHICS_MENU(VERB)	\
 	DXX_MENUITEM(VERB, CHECK, "Cutscene Smoothing", opt_gr_movietexfilt, GameCfg.MovieTexFilt)
 #endif
-#define DXX_VULKAN_GRAPHICS_MENU(VERB)
 
 #else
 #define DXX_OGL0_GRAPHICS_MENU(VERB)
 #define DXX_OGL1_GRAPHICS_MENU(VERB)
-#if DXX_USE_VULKAN
-#define DXX_VULKAN_GRAPHICS_MENU(VERB)	\
-	DXX_MENUITEM(VERB, CHECK, "4x multisampling", opt_gr_multisample, CGameCfg.Multisample)
-#else
-#define DXX_VULKAN_GRAPHICS_MENU(VERB)
-#endif
 #endif
 	enum {
 		DXX_GRAPHICS_MENU(ENUM)
@@ -2140,7 +2132,7 @@ struct graphics_config_menu_items
 	graphics_config_menu_items()
 	{
 		DXX_GRAPHICS_MENU(ADD);
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 		m[opt_filter_none + static_cast<unsigned>(CGameCfg.TexFilt)].value = 1;
 #endif
 	}
@@ -2187,6 +2179,7 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 			return window_event_result::handled;		// stay in menu
 		}
 		case event_type::window_close:
+#if DXX_USE_OGL || DXX_USE_VULKAN
 #if DXX_USE_OGL
 			if (CGameCfg.VSync != m[opt_gr_vsync].value || CGameCfg.Multisample != m[opt_gr_multisample].value)
 			{
@@ -2199,6 +2192,7 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 				};
 				run_blocking_newmenu<warn_might_need_restart>();
 			}
+#endif
 
 			for (const uint8_t i : xrange(3u))
 				if (m[i + opt_filter_none].value)
@@ -2214,19 +2208,6 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 			PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
 			CGameCfg.VSync = m[opt_gr_vsync].value;
 			CGameCfg.Multisample = m[opt_gr_multisample].value;
-#elif DXX_USE_VULKAN
-			if (CGameCfg.Multisample != m[opt_gr_multisample].value)
-			{
-				struct warn_might_need_restart : passive_messagebox
-				{
-					warn_might_need_restart() :
-						passive_messagebox(menu_title{nullptr}, menu_subtitle{"Changing 4x Multisample\nrequires a restart."}, TXT_OK, grd_curscreen->sc_canvas)
-						{
-						}
-				};
-				run_blocking_newmenu<warn_might_need_restart>();
-			}
-			CGameCfg.Multisample = m[opt_gr_multisample].value;
 #endif
 			CGameCfg.GammaLevel = m[opt_gr_brightness].value;
 			CGameCfg.FPSIndicator = m[opt_gr_fpsindi].value;
@@ -2234,6 +2215,10 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 #if DXX_USE_OGL
 			gr_set_attributes();
 			gr_set_mode(Game_screen_mode);
+#elif DXX_USE_VULKAN
+			/* Rebuilding the swapchain applies VSync and multisampling. */
+			gr_set_attributes();
+			gr_set_mode_from_window_size();
 #endif
 			break;
 

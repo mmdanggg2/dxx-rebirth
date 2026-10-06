@@ -619,7 +619,8 @@ void vks_init_instance(SDL_Window *sdl_window)
 
 /* Choose the MSAA sample count from CGameCfg.Multisample (the "4x
  * multisampling" graphics option), clamped to what the device supports for
- * both colour and depth attachments. Applied at init / swapchain recreate. */
+ * both colour and depth attachments. Applied at every swapchain rebuild, so
+ * changing the option takes effect with the next gr_set_mode. */
 static void vks_select_msaa_samples()
 {
 	vk_msaa_samples = VK_SAMPLE_COUNT_1_BIT;
@@ -638,7 +639,6 @@ static void vks_select_msaa_samples()
 void vks_init_physical_device()
 {
 	pickPhysicalDevice();
-	vks_select_msaa_samples();
 }
 
 void vks_init_device()
@@ -1481,6 +1481,7 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 
 	/* vks_init_swapchain settles the real extent from the surface
 	 * capabilities; size everything else from that. */
+	vks_select_msaa_samples();
 	vks_init_swapchain(w, h);
 	const auto extent = vk_surface_extent;
 	vks_init_swapchain_image_views();

@@ -74,8 +74,6 @@ void g3_stereo_frame(const int xeye, const int xoff)
 {
 #if DXX_USE_OGL
 	ogl_stereo_frame(xeye < 0, xoff);
-#elif DXX_USE_VULKAN
-	vks_stereo_frame(xeye < 0, xoff);
 #else
 	(void)xeye;
 	(void)xoff;
