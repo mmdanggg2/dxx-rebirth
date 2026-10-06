@@ -246,16 +246,23 @@ static void createDevice()
 	vkGetDeviceQueue(vk_device, vk_graphics_queue_family, 0, &vk_graphics_queue);
 }
 
-/* Per-frame vertex buffers: one per frame-in-flight, host-visible and
- * persistently mapped. 2D draws append vertices to the current frame's
- * buffer; vks_begin_frame resets that buffer's cursor once its fence has
- * retired, so the GPU is done with the region we overwrite. */
-struct vks_frame_vb
+/* Per-frame vertex buffers: one chain per frame-in-flight, host-visible and
+ * persistently mapped. Draws append vertices to the current frame's chain;
+ * when a buffer fills, the next (or a new, larger) one is used, so a busy
+ * frame never runs out. vks_begin_frame rewinds the chain once the slot's
+ * fence has retired, so the GPU is done with the regions we overwrite. */
+struct vks_vertex_chunk
 {
 	VkBuffer buffer{VK_NULL_HANDLE};
 	VkDeviceMemory memory{VK_NULL_HANDLE};
 	void *mapped{};
 	VkDeviceSize capacity{};
+};
+struct vks_frame_vb
+{
+	std::vector<vks_vertex_chunk> chunks;
+	/* Chunk being filled, and the write offset within it. */
+	std::size_t current{};
 	VkDeviceSize offset{};
 };
 static std::vector<vks_frame_vb> vk_frame_vbs;
@@ -282,64 +289,76 @@ static uint32_t find_host_visible_memory_type(VkMemoryRequirements memRequiremen
 	Error("Vulkan: no host-visible coherent memory type for vertex buffer");
 }
 
+static vks_vertex_chunk create_vertex_chunk(const VkDeviceSize capacity)
+{
+	vks_vertex_chunk vb;
+	VkBufferCreateInfo bufferInfo{};
+	bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	bufferInfo.size = capacity;
+	bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+	bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &vb.buffer);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create vertex buffer");
+
+	VkMemoryRequirements memRequirements;
+	vkGetBufferMemoryRequirements(vk_device, vb.buffer, &memRequirements);
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memRequirements.size;
+	allocInfo.memoryTypeIndex = find_host_visible_memory_type(memRequirements);
+
+	result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &vb.memory);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate vertex buffer memory");
+
+	result = vkBindBufferMemory(vk_device, vb.buffer, vb.memory, 0);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to bind vertex buffer memory");
+
+	result = vkMapMemory(vk_device, vb.memory, 0, capacity, 0, &vb.mapped);
+	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to map vertex buffer memory");
+
+	vb.capacity = capacity;
+	return vb;
+}
+
 void vks_init_vertex_buffers()
 {
-	const size_t n = vk_command_buffers.size();
-	vk_frame_vbs.assign(n, vks_frame_vb{});
-	for (auto &vb : vk_frame_vbs) {
-		VkBufferCreateInfo bufferInfo{};
-		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = VKS_VB_CAPACITY;
-		bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-		VkResult result = vkCreateBuffer(vk_device, &bufferInfo, nullptr, &vb.buffer);
-		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create vertex buffer");
-
-		VkMemoryRequirements memRequirements;
-		vkGetBufferMemoryRequirements(vk_device, vb.buffer, &memRequirements);
-
-		VkMemoryAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		allocInfo.allocationSize = memRequirements.size;
-		allocInfo.memoryTypeIndex = find_host_visible_memory_type(memRequirements);
-
-		result = vkAllocateMemory(vk_device, &allocInfo, nullptr, &vb.memory);
-		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to allocate vertex buffer memory");
-
-		result = vkBindBufferMemory(vk_device, vb.buffer, vb.memory, 0);
-		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to bind vertex buffer memory");
-
-		result = vkMapMemory(vk_device, vb.memory, 0, VKS_VB_CAPACITY, 0, &vb.mapped);
-		if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to map vertex buffer memory");
-
-		vb.capacity = VKS_VB_CAPACITY;
-		vb.offset = 0;
-	}
+	vk_frame_vbs.resize(vk_command_buffers.size());
+	for (auto &vb : vk_frame_vbs)
+		vb.chunks.emplace_back(create_vertex_chunk(VKS_VB_CAPACITY));
 }
 
 void vks_destroy_vertex_buffers()
 {
-	for (auto &vb : vk_frame_vbs) {
-		if (vb.mapped)
-			vkUnmapMemory(vk_device, vb.memory);
-		if (vb.buffer)
-			vkDestroyBuffer(vk_device, vb.buffer, nullptr);
-		if (vb.memory)
-			vkFreeMemory(vk_device, vb.memory, nullptr);
-	}
+	for (auto &vb : vk_frame_vbs)
+		for (auto &chunk : vb.chunks)
+		{
+			vkUnmapMemory(vk_device, chunk.memory);
+			vkDestroyBuffer(vk_device, chunk.buffer, nullptr);
+			vkFreeMemory(vk_device, chunk.memory, nullptr);
+		}
 	vk_frame_vbs.clear();
 }
 
 vks_vertex_alloc vks_alloc_bytes(uint32_t bytes)
 {
 	auto &vb = vk_frame_vbs[vk_current_frame];
-	if (vb.offset + bytes > vb.capacity)
-		Error("Vulkan: vertex buffer overflow");
+	if (vb.offset + bytes > vb.chunks[vb.current].capacity)
+	{
+		/* Move to the next chunk, adding one twice as large when the chain
+		 * is exhausted. Recorded draws keep referencing the earlier ones. */
+		vb.offset = 0;
+		if (++vb.current == vb.chunks.size())
+			vb.chunks.emplace_back(create_vertex_chunk(std::max<VkDeviceSize>(vb.chunks.back().capacity * 2, bytes)));
+		else if (bytes > vb.chunks[vb.current].capacity)
+			vb.chunks.insert(vb.chunks.begin() + vb.current, create_vertex_chunk(std::max<VkDeviceSize>(vb.chunks.back().capacity * 2, bytes)));
+	}
+	const auto &chunk = vb.chunks[vb.current];
 	vks_vertex_alloc a;
-	a.buffer = vb.buffer;
+	a.buffer = chunk.buffer;
 	a.offset = vb.offset;
-	a.data = static_cast<char *>(vb.mapped) + vb.offset;
+	a.data = static_cast<char *>(chunk.mapped) + vb.offset;
 	vb.offset += bytes;
 	return a;
 }
@@ -1544,7 +1563,11 @@ static bool vks_begin_frame()
 
 	/* This frame's vertex buffer is now retired (fence waited); reuse it. */
 	if (vk_current_frame < vk_frame_vbs.size())
-		vk_frame_vbs[vk_current_frame].offset = 0;
+	{
+		auto &vb = vk_frame_vbs[vk_current_frame];
+		vb.current = 0;
+		vb.offset = 0;
+	}
 
 	VkResult result = vkAcquireNextImageKHR(vk_device, vk_swapchain, UINT64_MAX,
 		vk_image_available_semaphores[vk_current_frame], VK_NULL_HANDLE, &vk_image_index);
