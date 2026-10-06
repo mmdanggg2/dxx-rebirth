@@ -2160,8 +2160,12 @@ window_event_result graphics_config_menu::event_handler(const d_event &event)
 				CGameCfg.GammaLevel = GammaLevel;
 				gr_palette_set_gamma(GammaLevel);
 			}
+#if DXX_USE_OGL || DXX_USE_VULKAN
 #if DXX_USE_OGL
 			else if (citem == opt_filter_anisotropy && ogl_maxanisotropy <= 1.0 && m[opt_filter_anisotropy].value)
+#else
+			else if (citem == opt_filter_anisotropy && vk_max_sampler_anisotropy <= 1.0f && m[opt_filter_anisotropy].value)
+#endif
 			{
 				m[opt_filter_anisotropy].value = 0;
 				window_create<passive_messagebox>(menu_title{TXT_ERROR}, menu_subtitle{"Anisotropic Filtering not\nsupported by your hardware/driver."}, TXT_OK, grd_curscreen->sc_canvas);
