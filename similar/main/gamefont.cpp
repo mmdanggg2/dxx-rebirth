@@ -35,6 +35,8 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "mission.h"
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_textures.h"
 #endif
 #include "config.h"
 #include "console.h"
@@ -122,12 +124,14 @@ void gamefont_choose_game_font(int scrx,int scry){
 		auto &f{*best_gamefont};
 #if DXX_USE_OGL
 		if (CGameCfg.TexFilt != opengl_texture_filter::classic)
+#else
+		if (vulkan_texture_filter{static_cast<uint8_t>(CGameCfg.TexFilt)} != vulkan_texture_filter::classic)
+#endif
 		{
 			FNTScaleX.reset(static_cast<float>(scrx) / f.expected_screen_resolution_x);
 			FNTScaleY.reset(static_cast<float>(scry) / f.expected_screen_resolution_y);
 		}
 		else
-#endif
 		{
 			FNTScaleX.reset(scrx / f.expected_screen_resolution_x);
 			FNTScaleY.reset(scry / f.expected_screen_resolution_y);
