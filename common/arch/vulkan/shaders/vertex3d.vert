@@ -32,5 +32,5 @@ void main() {
 	float depth = far * (z - near) / (z * (far - near));
 	gl_Position = vec4(a_pos.x, -a_pos.y, depth * z, z);
 	v_uv = a_uv;
-	v_color = a_color;
+	v_color = clamp(a_color, 0.0, 1.0);
 }
