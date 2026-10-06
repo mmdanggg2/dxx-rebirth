@@ -38,6 +38,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #if DXX_USE_OGL
 #include "ogl_init.h"
+#elif DXX_USE_VULKAN
+#include "vulkan_init.h"
 #endif
 
 #include "pstypes.h"
@@ -860,15 +862,26 @@ void record_screenshot_text_metadata(png_struct *const png_ptr, png_info *const 
 #if DXX_USE_OGL
 #define write_screenshot_png(F,T,B,P)	write_screenshot_png(F,T,B)
 #endif
+#if DXX_USE_VULKAN
+/* Vulkan passes the frame read back from the swapchain: RGB, rows top to
+ * bottom. */
+unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm, const std::span<uint8_t> rgb, const unsigned bm_w, const unsigned bm_h)
+#else
 unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm, const grs_bitmap &bitmap, const palette_array_t &pal)
+#endif
 {
+#if !DXX_USE_VULKAN
 	const unsigned bm_w = ((bitmap.bm_w + 3) & ~3);
 	const unsigned bm_h = ((bitmap.bm_h + 3) & ~3);
+#endif
 #if DXX_USE_OGL
 	const unsigned bufsize = bm_w * bm_h * 3;
 	const auto buf = std::make_unique<uint8_t[]>(bufsize);
 	const auto begin_byte_buffer = buf.get();
 	glReadPixels(0, 0, bm_w, bm_h, GL_RGB, GL_UNSIGNED_BYTE, begin_byte_buffer);
+#elif DXX_USE_VULKAN
+	const unsigned bufsize = rgb.size();
+	const auto begin_byte_buffer = rgb.data();
 #else
 	const unsigned bufsize = bitmap.bm_rowsize * bm_h;
 	const auto begin_byte_buffer = bitmap.bm_mdata;
@@ -894,7 +907,7 @@ unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm
 		if (tm)
 			record_screenshot_time(*tm, ss.png_ptr, ss.info_ptr);
 		png_set_write_fn(ss.png_ptr, file, &d_screenshot::png_write_cb, &d_screenshot::png_flush_cb);
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 		const auto color_type{PNG_COLOR_TYPE_RGB};
 #else
 		png_set_PLTE(ss.png_ptr, ss.info_ptr, reinterpret_cast<const png_color *>(pal.data()), pal.size());
@@ -917,6 +930,12 @@ unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm
 		 */
 		const uint_fast32_t stride = bm_w * 3;	/* Without palette, written data is 3-byte-sized RGB tuples of color */
 		for (auto p = end_byte_buffer; p != begin_byte_buffer;)
+#elif DXX_USE_VULKAN
+		/* The Vulkan readback is RGB with origin in top left, matching the
+		 * PNG layout.
+		 */
+		const uint_fast32_t stride = bm_w * 3;
+		for (auto p = begin_byte_buffer; p != end_byte_buffer;)
 #else
 		const uint_fast32_t stride = bm_w;	/* With palette, written data is byte-sized indices into a color table */
 		/* SDL canvas uses an image with origin in top left.  Write rows
@@ -927,10 +946,13 @@ unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm
 		{
 #if DXX_USE_OGL
 			p -= stride;
-#else
+#elif !DXX_USE_VULKAN
 			p += stride;
 #endif
 			*o++ = p;
+#if DXX_USE_VULKAN
+			p += stride;
+#endif
 			if (o == row_pointers.end())
 			{
 				/* Internal capacity exhausted.  Flush rows and rewind
@@ -957,6 +979,38 @@ unsigned write_screenshot_png(PHYSFS_File *const file, const struct tm *const tm
 }
 #endif
 
+#if DXX_USE_VULKAN && DXX_USE_SCREENSHOT_FORMAT_LEGACY
+/* Write the Vulkan readback (RGB, origin top left) as an uncompressed 24-bit
+ * TGA, the format the OpenGL write_bmp produces. */
+void write_tga(PHYSFS_File *const file, const std::span<uint8_t> rgb, const unsigned w, const unsigned h)
+{
+	std::array<uint8_t, 18> header{};
+	header[2] = 2;	/* uncompressed true-colour */
+	header[12] = w % 256;
+	header[13] = w / 256;
+	header[14] = h % 256;
+	header[15] = h / 256;
+	header[16] = 24;
+	header[17] = 0x20;	/* origin top left */
+	PHYSFSX_writeBytes(file, header.data(), header.size());
+	/* TGA stores BGR */
+	for (size_t i = 0; i < rgb.size(); i += 3)
+		std::swap(rgb[i], rgb[i + 2]);
+	PHYSFSX_writeBytes(file, rgb.data(), rgb.size());
+}
+#endif
+
+#if DXX_USE_SCREENSHOT
+void report_screenshot_open_failure(const char *const savename, const PHYSFS_ErrorCode physfserr, const int automap_flag)
+{
+	const auto e = PHYSFS_getErrorByCode(physfserr);
+	if (!automap_flag)
+		HUD_init_message(HM_DEFAULT, "Failed to open screenshot file for writing: %s: %s", &savename[sizeof(SCRNS_DIR) - 1], e);
+	else
+		con_printf(CON_URGENT, "Failed to open screenshot file for writing: %s: %s", savename, e);
+}
+#endif
+
 }
 
 #if DXX_USE_SCREENSHOT
@@ -973,7 +1027,7 @@ void save_screen_shot(int automap_flag)
 #if DXX_USE_SCREENSHOT_FORMAT_PNG
 #define DXX_SCREENSHOT_FILE_EXTENSION	"png"
 #elif DXX_USE_SCREENSHOT_FORMAT_LEGACY
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 #define DXX_SCREENSHOT_FILE_EXTENSION	"tga"
 #else
 #define DXX_SCREENSHOT_FILE_EXTENSION	"pcx"
@@ -1022,6 +1076,31 @@ void save_screen_shot(int automap_flag)
 #undef DXX_SCREENSHOT_TIME_FORMAT_STRING
 #undef DXX_SCREENSHOT_FILE_EXTENSION
 	}
+#if DXX_USE_VULKAN
+	/* Like OpenGL's glReadBuffer(GL_FRONT), capture what is on screen: the
+	 * frame presented next, read back as it is presented. The file is
+	 * written, and the message shown, once it has been captured.
+	 */
+	std::optional<struct tm> captured_tm;
+	if (tm)
+		captured_tm = *tm;
+	vks_capture_next_frame([automap_flag, captured_tm, savename = std::to_array(savename)](const std::span<uint8_t> rgb, const uint32_t w, const uint32_t h) {
+		if (const auto &&[file, physfserr] = PHYSFSX_openWriteBuffered(savename.data()); file)
+		{
+			if (!automap_flag)
+				HUD_init_message(HM_DEFAULT, "%s '%s'", TXT_DUMPING_SCREEN, &savename[sizeof(SCRNS_DIR) - 1]);
+#if DXX_USE_SCREENSHOT_FORMAT_PNG
+			if (write_screenshot_png(file, captured_tm ? &*captured_tm : nullptr, rgb, w, h))
+				PHYSFS_delete(savename.data());
+#elif DXX_USE_SCREENSHOT_FORMAT_LEGACY
+			(void)captured_tm;
+			write_tga(file, rgb, w, h);
+#endif
+		}
+		else
+			report_screenshot_open_failure(savename.data(), physfserr, automap_flag);
+	});
+#else
 	if (const auto &&[file, physfserr] = PHYSFSX_openWriteBuffered(savename); file)
 	{
 	if (!automap_flag)
@@ -1063,14 +1142,8 @@ void save_screen_shot(int automap_flag)
 		PHYSFS_delete(savename);
 	}
 	else
-	{
-		const auto e = PHYSFS_getErrorByCode(physfserr);
-		if (!automap_flag)
-			HUD_init_message(HM_DEFAULT, "Failed to open screenshot file for writing: %s: %s", &savename[sizeof(SCRNS_DIR) - 1], e);
-		else
-			con_printf(CON_URGENT, "Failed to open screenshot file for writing: %s: %s", savename, e);
-		return;
-	}
+		report_screenshot_open_failure(savename, physfserr, automap_flag);
+#endif
 }
 #endif
 

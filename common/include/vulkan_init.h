@@ -24,6 +24,7 @@
 #include "internal.h"
 #include "vulkan_textures.h"
 #include <array>
+#include <functional>
 #include <span>
 
 constexpr int vulkan_bitmap_use_dst_canvas = -1;
@@ -54,6 +55,9 @@ extern VkPipeline vk_2d_pipeline;
 extern VkPipeline vk_2d_pipeline_additive;
 extern VkPipeline vk_2d_pipeline_darken;
 extern VkRenderPass vk_render_pass;
+/* Compatible pass that loads instead of clearing, to resume a frame after a
+ * readback split it. */
+extern VkRenderPass vk_render_pass_resume;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
 extern VkPipelineLayout vk_2d_pipeline_layout;
 /* 3D pipelines: one per blend mode plus wireframe lines, each built with and
@@ -112,7 +116,6 @@ void vks_init_device();
 void vks_init_surface(SDL_Window *window_handle);
 void vks_init_swapchain(uint32_t width, uint32_t height);
 void vks_init_swapchain_image_views();
-void vks_record_initial_barriers();
 void vks_destroy_swapchain_image_views();
 void vks_init_render_pass();
 void vks_init_pipeline();
@@ -191,6 +194,17 @@ void vks_present_frame();
  * depth, pipeline, framebuffers, sync objects, vertex buffers) for a new
  * extent. Called on startup, resize, and when the swapchain goes out of date. */
 void vks_recreate_swapchain(uint32_t w, uint32_t h);
+/* Copy the `w`x`h` region at (`x`,`y`) (top-left origin) of the frame being
+ * recorded into `rgb` (3 bytes per pixel, rows top to bottom), as
+ * glReadPixels on the back buffer does; the frame is submitted up to this
+ * point, then resumed. Returns false if nothing could be read. */
+bool vks_read_pixels(uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::span<uint8_t> rgb);
+/* Call `capture` with the whole of the next presented frame (RGB, rows top
+ * to bottom, `w` x `h`), the counterpart of reading GL_FRONT for
+ * screenshots: frames are submitted at present, so what is on screen is
+ * read as it is presented. */
+using vks_frame_capture = std::move_only_function<void(std::span<uint8_t> rgb, uint32_t w, uint32_t h)>;
+void vks_capture_next_frame(vks_frame_capture capture);
 
 /* Color palette conversion (Vulkan equivalent of ogl_colors) */
 struct vks_colors

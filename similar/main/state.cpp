@@ -1386,6 +1386,16 @@ int state_save_all_sub(const char *filename, const char *desc)
 			cnv->cv_bitmap.get_bitmap_data()[THUMBNAIL_W * k + j] =
 				gr_find_closest_color(buf[4*i]/4, buf[4*i+1]/4, buf[4*i+2]/4);
 		}
+#elif DXX_USE_VULKAN
+		/* render_frame drew the thumbnail-sized view at the top left of the
+		 * frame being recorded; read it back as OpenGL does. */
+		const auto buf = std::make_unique<uint8_t[]>(THUMBNAIL_W * THUMBNAIL_H * 3);
+		const auto data = cnv->cv_bitmap.get_bitmap_data();
+		if (vks_read_pixels(0, 0, THUMBNAIL_W, THUMBNAIL_H, std::span(buf.get(), THUMBNAIL_W * THUMBNAIL_H * 3)))
+			for (unsigned i = 0; i < THUMBNAIL_W * THUMBNAIL_H; i++)
+				data[i] = gr_find_closest_color(buf[3*i]/4, buf[3*i+1]/4, buf[3*i+2]/4);
+		else
+			std::fill_n(data, THUMBNAIL_W * THUMBNAIL_H, BM_XRGB(0, 0, 0));
 #endif
 		}
 

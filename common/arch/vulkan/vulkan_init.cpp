@@ -53,6 +53,13 @@ VkPipeline vk_2d_pipeline_additive;
 VkPipeline vk_2d_pipeline_darken;
 std::array<std::array<VkPipeline, 4>, 2> vk_3d_pipelines;
 VkRenderPass vk_render_pass;
+VkRenderPass vk_render_pass_resume;
+/* Whether swapchain images can be copied from (screenshots, thumbnails), and
+ * whether their texels are stored BGRA rather than RGBA. */
+static bool vk_swapchain_readable;
+static bool vk_swapchain_bgra;
+/* Signalled by the submit that ends a readback (vks_read_pixels). */
+static VkFence vk_readback_fence;
 VkDescriptorSetLayout vk_descriptor_set_layout;
 VkPipelineLayout vk_2d_pipeline_layout;
 VkDescriptorPool vk_descriptor_pool;
@@ -706,7 +713,13 @@ void vks_init_swapchain(uint32_t width, uint32_t height)
 	createInfo.imageColorSpace = surfaceFormat.colorSpace;
 	createInfo.imageExtent = vk_surface_extent;
 	createInfo.imageArrayLayers = 1;
-	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	/* Readback (screenshots, savegame thumbnails) copies from the swapchain
+	 * image, which needs TRANSFER_SRC where the surface allows it. */
+	const auto fmt = surfaceFormat.format;
+	vk_swapchain_bgra = fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB;
+	vk_swapchain_readable = (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+		(vk_swapchain_bgra || fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_R8G8B8A8_SRGB);
+	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (vk_swapchain_readable ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
 	createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	createInfo.preTransform = caps.currentTransform;
 	createInfo.compositeAlpha = compositeAlpha;
@@ -748,65 +761,25 @@ void vks_destroy_swapchain_image_views()
 	vk_swapchain_image_views.clear();
 }
 
-void vks_record_initial_barriers()
-{
-	/* Fetch swapchain images */
-	uint32_t imageCount;
-	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, nullptr);
-	std::vector<VkImage> swapchainImages(imageCount);
-	vkGetSwapchainImagesKHR(vk_device, vk_swapchain, &imageCount, swapchainImages.data());
-
-	VkImageMemoryBarrier barrier{};
-	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	barrier.subresourceRange.levelCount = 1;
-	barrier.subresourceRange.layerCount = 1;
-
-	VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = vk_command_pools[0];
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = 1;
-
-	for (uint32_t i = 0; i < imageCount; i++) {
-		barrier.image = swapchainImages[i];
-
-		VkCommandBuffer tmpCmd;
-		vkAllocateCommandBuffers(vk_device, &allocInfo, &tmpCmd);
-
-		VkCommandBufferBeginInfo beginInfo{};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-		vkBeginCommandBuffer(tmpCmd, &beginInfo);
-
-		vkCmdPipelineBarrier(tmpCmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-		vkEndCommandBuffer(tmpCmd);
-
-		vkFreeCommandBuffers(vk_device, vk_command_pools[0], 1, &tmpCmd);
-	}
-}
-
-void vks_init_render_pass()
+/* Build the frame render pass. `resume` builds the compatible pass used to
+ * continue a frame after vks_read_pixels split it: it loads colour and depth
+ * instead of clearing them. Both store colour (including the multisample
+ * image) and depth so a frame can be split for readback. */
+static VkRenderPass vks_create_render_pass(const bool resume)
 {
 	const bool msaa = vk_msaa_samples != VK_SAMPLE_COUNT_1_BIT;
+	const auto load = resume ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
 
 	VkAttachmentDescription colorAttachment{};
 	colorAttachment.format = vk_swapchain_format;
 	colorAttachment.samples = vk_msaa_samples;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	colorAttachment.storeOp = msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+	colorAttachment.loadOp = load;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	/* After a readback the swapchain image is back in PRESENT_SRC; the
+	 * multisample image keeps its final COLOR_ATTACHMENT layout. */
+	colorAttachment.initialLayout = !resume ? VK_IMAGE_LAYOUT_UNDEFINED : msaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 	colorAttachment.finalLayout = msaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
 	/* Resolve target (the swapchain image): the multisample colour attachment
@@ -824,11 +797,11 @@ void vks_init_render_pass()
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = vk_depth_format;
 	depthAttachment.samples = vk_msaa_samples;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.loadOp = load;
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthAttachment.initialLayout = resume ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkAttachmentReference colorAttachmentRef{};
@@ -850,13 +823,23 @@ void vks_init_render_pass()
 	subpass.pResolveAttachments = msaa ? &resolveAttachmentRef : nullptr;
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-	VkSubpassDependency dependency{};
-	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	dependency.srcAccessMask = 0;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	/* In: order attachment access after earlier attachment writes and
+	 * readback copies. Out: make the frame's colour writes (and final layout
+	 * transition) visible to a readback copy recorded after the pass. */
+	constexpr VkPipelineStageFlags attachment_stages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	std::array<VkSubpassDependency, 2> dependencies{};
+	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[0].dstSubpass = 0;
+	dependencies[0].srcStageMask = attachment_stages | VK_PIPELINE_STAGE_TRANSFER_BIT;
+	dependencies[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependencies[0].dstStageMask = attachment_stages;
+	dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependencies[1].srcSubpass = 0;
+	dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dependencies[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	dependencies[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
 	/* Attachment order: [0] colour (multisample when MSAA), then the resolve
 	 * target, then depth. Without MSAA colour resolves straight to the
@@ -879,11 +862,19 @@ void vks_init_render_pass()
 	createInfo.pAttachments = attachments;
 	createInfo.subpassCount = 1;
 	createInfo.pSubpasses = &subpass;
-	createInfo.dependencyCount = 1;
-	createInfo.pDependencies = &dependency;
+	createInfo.dependencyCount = dependencies.size();
+	createInfo.pDependencies = dependencies.data();
 
-	VkResult result = vkCreateRenderPass(vk_device, &createInfo, nullptr, &vk_render_pass);
+	VkRenderPass pass;
+	VkResult result = vkCreateRenderPass(vk_device, &createInfo, nullptr, &pass);
 	if (!( result == VK_SUCCESS )) Error("Vulkan: Failed to create render pass");;
+	return pass;
+}
+
+void vks_init_render_pass()
+{
+	vk_render_pass = vks_create_render_pass(false);
+	vk_render_pass_resume = vks_create_render_pass(true);
 }
 
 /* Pipeline layout and shader modules do not depend on the swapchain: create
@@ -1347,6 +1338,11 @@ void vks_shutdown()
 
 	for (auto &fence : vk_in_flight_fences)
 		vkDestroyFence(vk_device, fence, nullptr);
+	if (vk_readback_fence)
+	{
+		vkDestroyFence(vk_device, vk_readback_fence, nullptr);
+		vk_readback_fence = VK_NULL_HANDLE;
+	}
 	for (auto &sem : vk_present_semaphores)
 		vkDestroySemaphore(vk_device, sem, nullptr);
 	for (auto &sem : vk_image_available_semaphores)
@@ -1368,8 +1364,9 @@ void vks_shutdown()
 	vks_destroy_pipelines();
 	if (vk_2d_pipeline_layout)
 		vkDestroyPipelineLayout(vk_device, vk_2d_pipeline_layout, nullptr);
-	if (vk_render_pass)
-		vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
+	for (const auto pass : {vk_render_pass, vk_render_pass_resume})
+		if (pass)
+			vkDestroyRenderPass(vk_device, pass, nullptr);
 	if (vk_swapchain)
 		vkDestroySwapchainKHR(vk_device, vk_swapchain, nullptr);
 
@@ -1403,6 +1400,9 @@ bool vks_is_frame_recording()
 {
 	return vk_frame_recording;
 }
+/* Whether the recording frame has already submitted work waiting for its
+ * acquired image (a readback splits a frame into several submits). */
+static bool vk_frame_acquire_waited;
 
 /* Current 3D blend mode. Set by gr_settransblend (via vks_set_blend) and read
  * by vks_prepare_3d to pick the matching 3D pipeline. */
@@ -1455,8 +1455,9 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 		vk_swapchain_image_views.clear();
 		destroyColorResources();
 		destroyDepthResources();
-		if (vk_render_pass)
-			vkDestroyRenderPass(vk_device, vk_render_pass, nullptr);
+		for (const auto pass : {vk_render_pass, vk_render_pass_resume})
+			if (pass)
+				vkDestroyRenderPass(vk_device, pass, nullptr);
 	}
 
 	/* vks_init_swapchain settles the real extent from the surface
@@ -1479,6 +1480,30 @@ void vks_recreate_swapchain(uint32_t w, uint32_t h)
 	vk_need_recreate = false;
 	last_width = extent.width;
 	last_height = extent.height;
+}
+
+/* Begin the frame render pass on the acquired image: clearing colour and
+ * depth at the start of a frame, or loading them to resume after a
+ * readback. */
+static void vks_begin_render_pass(const VkCommandBuffer cmd, const bool resume)
+{
+	VkClearValue clearValues[3]{};
+	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+	/* With MSAA the render-pass attachment order is colour, resolve, depth; the
+	 * resolve target's loadOp is DONT_CARE, so only colour [0] and depth count. */
+	const bool msaa = vk_msaa_samples != VK_SAMPLE_COUNT_1_BIT;
+	clearValues[msaa ? 2 : 1].depthStencil = {1.0f, 0};
+
+	VkRenderPassBeginInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	renderPassInfo.renderPass = resume ? vk_render_pass_resume : vk_render_pass;
+	renderPassInfo.framebuffer = vk_framebuffers[vk_image_index];
+	renderPassInfo.renderArea.offset = {0, 0};
+	renderPassInfo.renderArea.extent = vk_surface_extent;
+	renderPassInfo.clearValueCount = resume ? 0 : msaa ? 3 : 2;
+	renderPassInfo.pClearValues = resume ? nullptr : clearValues;
+
+	vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 }
 
 /* Begin a new frame: recycle the per-frame command buffer, acquire the next
@@ -1555,25 +1580,9 @@ static bool vks_begin_frame()
 	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
 		Error("Vulkan: Failed to begin command buffer");
 
-	VkClearValue clearValues[3]{};
-	clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-	/* With MSAA the render-pass attachment order is colour, resolve, depth; the
-	 * resolve target's loadOp is DONT_CARE, so only colour [0] and depth count. */
-	const bool msaa = vk_msaa_samples != VK_SAMPLE_COUNT_1_BIT;
-	clearValues[msaa ? 2 : 1].depthStencil = {1.0f, 0};
-
-	VkRenderPassBeginInfo renderPassInfo{};
-	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = vk_render_pass;
-	renderPassInfo.framebuffer = vk_framebuffers[vk_image_index];
-	renderPassInfo.renderArea.offset = {0, 0};
-	renderPassInfo.renderArea.extent = vk_surface_extent;
-	renderPassInfo.clearValueCount = msaa ? 3 : 2;
-	renderPassInfo.pClearValues = clearValues;
-
-	vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
+	vks_begin_render_pass(cmd, false);
 	vk_frame_recording = true;
+	vk_frame_acquire_waited = false;
 	return true;
 }
 
@@ -1612,6 +1621,178 @@ bool vks_ensure_frame()
 	return vks_begin_frame();
 }
 
+/* Submit the frame's command buffer, after the current slot's pending texture
+ * uploads. The first submit of a frame waits for its acquired swapchain
+ * image; `present` signals the image's present semaphore. */
+static void vks_submit_frame(const VkCommandBuffer cmd, const bool present, const VkFence fence)
+{
+	/* Texture uploads recorded for this frame slot run first in the same
+	 * batch; their barriers make the images readable by the frame. */
+	const std::array<VkCommandBuffer, 2> cmds{{vks_end_pending_uploads(), cmd}};
+	const bool has_uploads = cmds[0] != VK_NULL_HANDLE;
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	if (!vk_frame_acquire_waited)
+	{
+		submitInfo.waitSemaphoreCount = 1;
+		submitInfo.pWaitSemaphores = &vk_image_available_semaphores[vk_current_frame];
+		submitInfo.pWaitDstStageMask = &waitStage;
+		vk_frame_acquire_waited = true;
+	}
+	submitInfo.commandBufferCount = has_uploads ? 2 : 1;
+	submitInfo.pCommandBuffers = has_uploads ? cmds.data() : &cmds[1];
+	if (present)
+	{
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &vk_present_semaphores[vk_image_index];
+	}
+
+	/* A failed submit (device lost, out of memory) never signals the fence,
+	 * so the next wait on it would hang: stop here instead. */
+	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, fence);
+	if (result != VK_SUCCESS)
+		Error("Vulkan: vkQueueSubmit failed (result=%d)", static_cast<int>(result));
+}
+
+/* Host-visible buffer receiving a copy of a region of the swapchain image. */
+class vks_readback
+{
+	VkBuffer buffer{};
+	VkDeviceMemory memory{};
+	const uint8_t *mapped{};
+public:
+	const uint32_t w, h;
+	vks_readback(const uint32_t w, const uint32_t h) :
+		w{w}, h{h}
+	{
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = static_cast<VkDeviceSize>(w) * h * 4;
+		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(vk_device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS)
+			Error("Vulkan: Failed to create readback buffer");
+		VkMemoryRequirements memRequirements;
+		vkGetBufferMemoryRequirements(vk_device, buffer, &memRequirements);
+		VkMemoryAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memRequirements.size;
+		allocInfo.memoryTypeIndex = find_host_visible_memory_type(memRequirements);
+		if (vkAllocateMemory(vk_device, &allocInfo, nullptr, &memory) != VK_SUCCESS)
+			Error("Vulkan: Failed to allocate readback memory");
+		vkBindBufferMemory(vk_device, buffer, memory, 0);
+		void *data;
+		if (vkMapMemory(vk_device, memory, 0, bufferInfo.size, 0, &data) != VK_SUCCESS)
+			Error("Vulkan: Failed to map readback memory");
+		mapped = static_cast<const uint8_t *>(data);
+	}
+	vks_readback(const vks_readback &) = delete;
+	vks_readback &operator=(const vks_readback &) = delete;
+	~vks_readback()
+	{
+		vkUnmapMemory(vk_device, memory);
+		vkDestroyBuffer(vk_device, buffer, nullptr);
+		vkFreeMemory(vk_device, memory, nullptr);
+	}
+	/* Record the copy of the region at (`x`,`y`) of the current swapchain
+	 * image, after the render pass has ended (its outgoing dependency makes
+	 * the colour writes visible to the transfer), leaving the image back in
+	 * PRESENT_SRC for presentation or vk_render_pass_resume. */
+	void record(const VkCommandBuffer cmd, const int32_t x, const int32_t y) const
+	{
+		VkImageMemoryBarrier barrier{};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.image = vk_swapchain_images[vk_image_index];
+		barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+		barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+		VkBufferImageCopy region{};
+		region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+		region.imageOffset = {x, y, 0};
+		region.imageExtent = {w, h, 1};
+		vkCmdCopyImageToBuffer(cmd, barrier.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
+
+		barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		barrier.srcAccessMask = 0;
+		barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		VkBufferMemoryBarrier host{};
+		host.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+		host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		host.buffer = buffer;
+		host.size = VK_WHOLE_SIZE;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+			0, 0, nullptr, 1, &host, 1, &barrier);
+	}
+	/* Convert the copied texels to RGB, once the copy has completed. */
+	void to_rgb(const std::span<uint8_t> rgb) const
+	{
+		const auto [ri, bi] = vk_swapchain_bgra ? std::pair{2, 0} : std::pair{0, 2};
+		for (size_t i = 0, n = static_cast<size_t>(w) * h; i != n; ++i)
+		{
+			rgb[i * 3] = mapped[i * 4 + ri];
+			rgb[i * 3 + 1] = mapped[i * 4 + 1];
+			rgb[i * 3 + 2] = mapped[i * 4 + bi];
+		}
+	}
+};
+
+bool vks_read_pixels(const uint32_t x, const uint32_t y, const uint32_t w, const uint32_t h, const std::span<uint8_t> rgb)
+{
+	if (!vk_swapchain_readable || !w || !h || rgb.size() < static_cast<size_t>(w) * h * 3)
+		return false;
+	if (!vks_begin_frame())
+		return false;
+	if (x + w > vk_surface_extent.width || y + h > vk_surface_extent.height)
+		return false;
+	const vks_readback readback{w, h};
+	const VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
+	vkCmdEndRenderPass(cmd);
+	readback.record(cmd, x, y);
+	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+		Error("Vulkan: Failed to end command buffer");
+	if (!vk_readback_fence)
+	{
+		VkFenceCreateInfo fenceInfo{};
+		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		if (vkCreateFence(vk_device, &fenceInfo, nullptr, &vk_readback_fence) != VK_SUCCESS)
+			Error("Vulkan: Failed to create readback fence");
+	}
+	vks_submit_frame(cmd, false, vk_readback_fence);
+	vkWaitForFences(vk_device, 1, &vk_readback_fence, VK_TRUE, UINT64_MAX);
+	vkResetFences(vk_device, 1, &vk_readback_fence);
+	readback.to_rgb(rgb);
+
+	/* Resume the frame: the command buffer has completed, so record its
+	 * remainder into it again, loading what was drawn so far. */
+	vkResetCommandBuffer(cmd, 0);
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS)
+		Error("Vulkan: Failed to begin command buffer");
+	vks_begin_render_pass(cmd, true);
+	return true;
+}
+
+static vks_frame_capture vk_pending_capture;
+
+void vks_capture_next_frame(vks_frame_capture capture)
+{
+	vk_pending_capture = std::move(capture);
+}
+
 /* Close the render pass, submit the frame's command buffer, and present. This
  * is the entire body of gr_flip(). Skips presenting when nothing was drawn;
  * on swapchain loss flags recreate for the next begin_frame. */
@@ -1622,34 +1803,21 @@ void vks_present_frame()
 		return;
 	}
 
-	VkCommandBuffer cmd = vk_command_buffers[vk_current_frame];
+	const auto frame = vk_current_frame;
+	VkCommandBuffer cmd = vk_command_buffers[frame];
 
 	vkCmdEndRenderPass(cmd);
+	std::optional<vks_readback> capture;
+	if (vk_pending_capture && vk_swapchain_readable)
+	{
+		capture.emplace(vk_surface_extent.width, vk_surface_extent.height);
+		capture->record(cmd, 0, 0);
+	}
 	if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
 		Error("Vulkan: Failed to end command buffer");
 	vk_frame_recording = false;
 
-	/* Texture uploads recorded for this frame slot run first in the same
-	 * batch; their barriers make the images readable by the frame. */
-	const std::array<VkCommandBuffer, 2> cmds{{vks_end_pending_uploads(), cmd}};
-	const bool has_uploads = cmds[0] != VK_NULL_HANDLE;
-
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &vk_image_available_semaphores[vk_current_frame];
-	submitInfo.pWaitDstStageMask = &waitStage;
-	submitInfo.commandBufferCount = has_uploads ? 2 : 1;
-	submitInfo.pCommandBuffers = has_uploads ? cmds.data() : &cmds[1];
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &vk_present_semaphores[vk_image_index];
-
-	/* A failed submit (device lost, out of memory) never signals the frame
-	 * fence, so the next wait on this slot would hang: stop here instead. */
-	VkResult result = vkQueueSubmit(vk_graphics_queue, 1, &submitInfo, vk_in_flight_fences[vk_current_frame]);
-	if (result != VK_SUCCESS)
-		Error("Vulkan: vkQueueSubmit failed (result=%d)", static_cast<int>(result));
+	vks_submit_frame(cmd, true, vk_in_flight_fences[frame]);
 
 	VkPresentInfoKHR presentInfo{};
 	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -1659,12 +1827,21 @@ void vks_present_frame()
 	presentInfo.pSwapchains = &vk_swapchain;
 	presentInfo.pImageIndices = &vk_image_index;
 
-	result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
+	const VkResult result = vkQueuePresentKHR(vk_graphics_queue, &presentInfo);
 	vk_current_frame = (vk_current_frame + 1) % VK_MAX_FRAMES_IN_FLIGHT;
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
 		vk_need_recreate = true;
 	else if (result != VK_SUCCESS)
 		con_printf(CON_URGENT, "Vulkan: vkQueuePresentKHR failed (result=%d)", static_cast<int>(result));
+
+	if (capture)
+	{
+		vkWaitForFences(vk_device, 1, &vk_in_flight_fences[frame], VK_TRUE, UINT64_MAX);
+		std::vector<uint8_t> rgb(static_cast<size_t>(capture->w) * capture->h * 3);
+		capture->to_rgb(rgb);
+		auto f = std::exchange(vk_pending_capture, nullptr);
+		f(rgb, capture->w, capture->h);
+	}
 }
 
 } /* namespace dcx */

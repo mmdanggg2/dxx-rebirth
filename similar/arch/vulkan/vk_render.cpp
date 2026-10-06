@@ -286,13 +286,14 @@ void vks_upixelc(const grs_bitmap &cv_bitmap, unsigned x, unsigned y, const colo
 	vks_emit(vk_white_descriptor_set, v, 6);
 }
 
+/* Read one pixel of the frame being drawn and map it to the nearest palette
+ * entry, as ogl_ugpixel does with glReadPixels (editor picking). */
 color_palette_index vks_ugpixel(const grs_bitmap &bitmap, unsigned x, unsigned y)
 {
-	(void)bitmap;
-	(void)x;
-	(void)y;
-	/* Placeholder: would need readback from swapchain image */
-	return 0;
+	std::array<uint8_t, 3> rgb{};
+	if (!vks_read_pixels(bitmap.bm_x + x, bitmap.bm_y + y, 1, 1, rgb))
+		return 0;
+	return gr_find_closest_color(rgb[0] / 4, rgb[1] / 4, rgb[2] / 4);
 }
 
 /* Rectangle drawing */
@@ -873,8 +874,9 @@ int Lighting_on = 0;
 unsigned Current_seg_depth = 0;
 
 /* Palette */
-void gr_palette_read(palette_array_t &)
+void gr_palette_read(palette_array_t &palette)
 {
+	copy_bound_palette(palette, gr_current_pal);
 }
 
 /* Draw mode stubs */
