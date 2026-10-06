@@ -51,10 +51,7 @@ VkFormat vk_depth_format;
 VkPipeline vk_2d_pipeline;
 VkPipeline vk_2d_pipeline_additive;
 VkPipeline vk_2d_pipeline_darken;
-VkPipeline vk_3d_pipeline;
-VkPipeline vk_3d_pipeline_additive_a;
-VkPipeline vk_3d_pipeline_additive_c;
-VkPipeline vk_3d_line_pipeline;
+std::array<std::array<VkPipeline, 4>, 2> vk_3d_pipelines;
 VkRenderPass vk_render_pass;
 VkDescriptorSetLayout vk_descriptor_set_layout;
 VkPipelineLayout vk_2d_pipeline_layout;
@@ -1093,8 +1090,6 @@ void vks_init_pipeline()
 
 		VkPipelineDepthStencilStateCreateInfo depthStencil{};
 		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-		depthStencil.depthTestEnable = VK_TRUE;
-		depthStencil.depthWriteEnable = VK_TRUE;
 		depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
 		depthStencil.depthBoundsTestEnable = VK_FALSE;
 		depthStencil.stencilTestEnable = VK_FALSE;
@@ -1106,14 +1101,18 @@ void vks_init_pipeline()
 		stages[0].pName = "main";
 		stages[1] = fragStage;
 
-		/* Build a 3D pipeline with the given colour blend factors. Depth config
-		 * is identical for all blend modes: additive layers still depth-test
+		/* Build a 3D pipeline with the given colour blend factors, with or
+		 * without depth testing (ogl_toggle_depth_test; disabling the test in
+		 * OpenGL also disables depth writes). Depth config is otherwise
+		 * identical for all blend modes: additive layers still depth-test
 		 * against the mine (so glows hide behind walls) but ADD rather than
 		 * replace, so overlapping additive layers -- a weapon's bright inner
 		 * core drawn before its outer shell -- combine instead of the shell
 		 * occluding the core. Mirrors ogl_set_blending: additive_a is
 		 * (SRC_ALPHA, ONE), additive_c is (ONE, ONE). */
-		auto make_3d = [&](VkBlendFactor srcColor, VkBlendFactor dstColor, VkPrimitiveTopology topology, VkPipeline &out) {
+		auto make_3d = [&](VkBlendFactor srcColor, VkBlendFactor dstColor, VkPrimitiveTopology topology, const bool depth_test, VkPipeline &out) {
+			depthStencil.depthTestEnable = depth_test;
+			depthStencil.depthWriteEnable = depth_test;
 			VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 			inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 			inputAssembly.topology = topology;
@@ -1150,10 +1149,14 @@ void vks_init_pipeline()
 			if (vkCreateGraphicsPipelines(vk_device, VK_NULL_HANDLE, 1, &info, nullptr, &out) != VK_SUCCESS)
 				Error("Vulkan: Failed to create 3D graphics pipeline");
 		};
-		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline);
-		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline_additive_a);
-		make_3d(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, vk_3d_pipeline_additive_c);
-		make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, vk_3d_line_pipeline);
+		for (const bool depth_test : {false, true})
+		{
+			auto &pipelines = vk_3d_pipelines[depth_test];
+			make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, depth_test, pipelines[static_cast<uint8_t>(vks_3d_pipeline_kind::normal)]);
+			make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, depth_test, pipelines[static_cast<uint8_t>(vks_3d_pipeline_kind::additive_a)]);
+			make_3d(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, depth_test, pipelines[static_cast<uint8_t>(vks_3d_pipeline_kind::additive_c)]);
+			make_3d(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, depth_test, pipelines[static_cast<uint8_t>(vks_3d_pipeline_kind::line)]);
+		}
 	}
 }
 
@@ -1319,12 +1322,19 @@ void vks_destroy_descriptor_pool()
 /* Destroy every graphics pipeline created by vks_init_pipeline. */
 static void vks_destroy_pipelines()
 {
-	for (auto *const pipeline : {&vk_2d_pipeline, &vk_2d_pipeline_additive, &vk_2d_pipeline_darken, &vk_3d_pipeline, &vk_3d_pipeline_additive_a, &vk_3d_pipeline_additive_c, &vk_3d_line_pipeline})
+	for (auto *const pipeline : {&vk_2d_pipeline, &vk_2d_pipeline_additive, &vk_2d_pipeline_darken})
 	{
 		if (*pipeline)
 			vkDestroyPipeline(vk_device, *pipeline, nullptr);
 		*pipeline = VK_NULL_HANDLE;
 	}
+	for (auto &pipelines : vk_3d_pipelines)
+		for (auto &pipeline : pipelines)
+		{
+			if (pipeline)
+				vkDestroyPipeline(vk_device, pipeline, nullptr);
+			pipeline = VK_NULL_HANDLE;
+		}
 }
 
 void vks_shutdown()
@@ -1399,6 +1409,15 @@ bool vks_is_frame_recording()
 static gr_blend vk_current_blend = gr_blend::normal;
 void vks_set_blend(gr_blend b) { vk_current_blend = b; }
 gr_blend vks_get_blend() { return vk_current_blend; }
+
+/* Depth testing for 3D draws (ogl_toggle_depth_test); selects between the
+ * depth-tested and depthless pipeline sets. */
+static bool vk_depth_test = true;
+void vks_toggle_depth_test(const bool enable) { vk_depth_test = enable; }
+VkPipeline vks_get_3d_pipeline(const vks_3d_pipeline_kind kind)
+{
+	return vk_3d_pipelines[vk_depth_test][static_cast<uint8_t>(kind)];
+}
 
 /* Set when acquire/present reports the swapchain out of date (or suboptimal);
  * vks_begin_frame rebuilds it before the next acquire. */
@@ -1567,6 +1586,7 @@ void vks_start_frame(grs_canvas &canvas)
 	if (!vks_begin_frame())
 		return;
 	vk_current_blend = gr_blend::normal;
+	vk_depth_test = true;
 	const auto &bm = canvas.cv_bitmap;
 	const int32_t x0 = std::max<int32_t>(bm.bm_x, 0);
 	const int32_t y0 = std::max<int32_t>(bm.bm_y, 0);

@@ -598,7 +598,7 @@ static void render_external_scene(fvcobjptridx &vcobjptridx, grs_canvas &canvas,
 {
 	auto &Objects = LevelUniqueObjectState.Objects;
 	auto &vmobjptridx = Objects.vmptridx;
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	int orig_Render_depth = Render_depth;
 #endif
 
@@ -640,12 +640,20 @@ static void render_external_scene(fvcobjptridx &vcobjptridx, grs_canvas &canvas,
 
 #if DXX_USE_OGL
 	ogl_toggle_depth_test(0);
+#elif DXX_USE_VULKAN
+	vks_toggle_depth_test(false);
+#endif
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	Render_depth = (200-(vm_vec_dist_quick(mine_ground_exit_point, Viewer_eye)/F1_0))/36;
 #endif
 	render_terrain(canvas, Viewer_eye, mine_ground_exit_point, exit_point_bmx, exit_point_bmy);
-#if DXX_USE_OGL
+#if DXX_USE_OGL || DXX_USE_VULKAN
 	Render_depth = orig_Render_depth;
+#endif
+#if DXX_USE_OGL
 	ogl_toggle_depth_test(1);
+#elif DXX_USE_VULKAN
+	vks_toggle_depth_test(true);
 #endif
 
 	draw_exit_model(canvas);

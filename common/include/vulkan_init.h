@@ -56,10 +56,21 @@ extern VkPipeline vk_2d_pipeline_darken;
 extern VkRenderPass vk_render_pass;
 extern VkDescriptorSetLayout vk_descriptor_set_layout;
 extern VkPipelineLayout vk_2d_pipeline_layout;
-extern VkPipeline vk_3d_pipeline;
-extern VkPipeline vk_3d_pipeline_additive_a;
-extern VkPipeline vk_3d_pipeline_additive_c;
-extern VkPipeline vk_3d_line_pipeline;
+/* 3D pipelines: one per blend mode plus wireframe lines, each built with and
+ * without depth testing, indexed [depth_test][kind]. */
+enum class vks_3d_pipeline_kind : uint8_t
+{
+	normal,
+	additive_a,
+	additive_c,
+	line,
+};
+extern std::array<std::array<VkPipeline, 4>, 2> vk_3d_pipelines;
+/* Enable or disable depth testing (and writes) for subsequent 3D draws, as
+ * ogl_toggle_depth_test does; each 3D view starts with it enabled. */
+void vks_toggle_depth_test(bool enable);
+/* The 3D pipeline of `kind` for the current depth-test state. */
+VkPipeline vks_get_3d_pipeline(vks_3d_pipeline_kind kind);
 /* Current 3D blend mode (set via gr_settransblend); selects the 3D pipeline
  * so additive draws (weapon cores, explosions, glows) combine rather than
  * replace. Mirrors ogl_set_blending. */
