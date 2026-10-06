@@ -769,9 +769,10 @@ static unsigned vks_font_get_total_width(const grs_font &font)
 }
 
 /* Build the glyph atlas (ft_parent_bitmap) + one sub-bitmap per glyph
- * (ft_bitmaps), mirroring ogl_init_font. Unlike OpenGL, no texture is created
- * or uploaded here: vks_ubitmapm_cs uploads ft_parent_bitmap on demand when a
- * glyph is first drawn, and walks each sub-bitmap to the parent for UVs. */
+ * (ft_bitmaps), mirroring ogl_init_font. As there, the atlas is uploaded
+ * now, through the palette current at font (re)initialisation: a lazy upload
+ * at first draw would bake whatever palette a title or briefing screen had
+ * loaded by then. Glyph draws walk each sub-bitmap to the parent for UVs. */
 static void vks_init_font(grs_font *const font)
 {
 	const unsigned nchars = font->ft_maxchar - font->ft_minchar + 1;
@@ -855,6 +856,7 @@ static void vks_init_font(grs_font *const font)
 		gr_init_sub_bitmap(font->ft_bitmaps[i], font->ft_parent_bitmap, {curx}, {cury}, {w}, {h});
 		curx+=w+gap;
 	}
+	vks_get_bmtexture(font->ft_parent_bitmap, false);
 }
 
 static void vks_internal_string_fn(grs_canvas &canvas, const grs_font &cv_font, const int entry_x, int yy, const char *const s)
