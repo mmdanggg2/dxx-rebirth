@@ -1579,7 +1579,7 @@ static bool vks_begin_frame()
 	}
 	if (result == VK_SUBOPTIMAL_KHR)
 		vk_need_recreate = true;
-	if (result != VK_SUCCESS) {
+	else if (result != VK_SUCCESS) {
 		con_printf(CON_URGENT, "Vulkan: vkAcquireNextImageKHR returned %d", static_cast<int>(result));
 		if (result == VK_ERROR_SURFACE_LOST_KHR || result == VK_ERROR_DEVICE_LOST ||
 			result == VK_ERROR_TOO_MANY_OBJECTS || result == VK_ERROR_OUT_OF_HOST_MEMORY ||
