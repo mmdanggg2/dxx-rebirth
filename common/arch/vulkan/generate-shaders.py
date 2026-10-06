@@ -1,35 +1,50 @@
 #!/usr/bin/python
 """Generate a C++ header with embedded SPIR-V shader bytecode."""
 
-import sys
 import pathlib
+import struct
+import sys
+
+SPIRV_MAGIC = 0x07230203
 
 
-def format_spv_byte(data: bytes, width: int = 12) -> str:
-    """Format binary data as C hex-literal byte array, wrapping at `width`."""
+def read_spv_words(spv_path: pathlib.Path) -> tuple[int, ...]:
+    """Read a SPIR-V module as words, in the byte order its magic number declares."""
+    data = spv_path.read_bytes()
+    if len(data) % 4:
+        raise ValueError(f'{spv_path}: size {len(data)} is not a multiple of 4')
+    for order in '<>':
+        words = struct.unpack(f'{order}{len(data) // 4}I', data)
+        if words and words[0] == SPIRV_MAGIC:
+            return words
+    raise ValueError(f'{spv_path}: missing SPIR-V magic number')
+
+
+def format_spv_words(words: tuple[int, ...], width: int = 6) -> str:
+    """Format SPIR-V words as C hex literals, wrapping at `width` per line."""
     lines: list[str] = []
-    for i in range(0, len(data), width):
-        chunk = data[i : i + width]
-        hex_bytes = ', '.join(f'0x{b:02x}' for b in chunk)
-        lines.append(f'    {hex_bytes},')
+    for i in range(0, len(words), width):
+        chunk = words[i : i + width]
+        lines.append('    ' + ', '.join(f'0x{w:08x}' for w in chunk) + ',')
     return '\n'.join(lines)
 
 
 def generate_shader_block(name: str, spv_path: pathlib.Path) -> str:
-    """Generate the shader block for one SPIR-V file."""
-    spv_data = spv_path.read_bytes()
-    byte_array = format_spv_byte(spv_data)
+    """Generate the shader block for one SPIR-V file. The words are emitted as
+    numbers so the compiler lays them out in the target's byte order, aligned
+    as VkShaderModuleCreateInfo::pCode requires."""
+    word_array = format_spv_words(read_spv_words(spv_path))
     return f'''
-static constexpr uint8_t {name}_spv_bytes[] = {{
-{byte_array}
+static constexpr uint32_t {name}_spv_words[] = {{
+{word_array}
 }};
 
-static constexpr uint32_t *{name}_spv_code() {{
-    return reinterpret_cast<uint32_t *>(const_cast<uint8_t *>({name}_spv_bytes));
+static constexpr const uint32_t *{name}_spv_code() {{
+    return {name}_spv_words;
 }}
 
 static constexpr std::size_t {name}_spv_size() {{
-    return sizeof({name}_spv_bytes);
+    return sizeof({name}_spv_words);
 }}
 '''
 
