@@ -125,7 +125,7 @@ static void vks_push_alpha_ref(const VkCommandBuffer cmd)
  * vertex positions by each caller (adding canvas.cv_bitmap.bm_x/y), matching
  * the OpenGL backend which normalizes absolute coordinates against the full
  * screen via glOrtho(0,1). */
-static bool vks_prepare_2d(const VkPipeline pipeline = vk_2d_pipeline)
+static bool vks_prepare_2d(const VkPipeline &pipeline = vk_2d_pipeline)
 {
 	if (!vks_ensure_frame())
 		return false;
@@ -226,16 +226,13 @@ static void vks_do_palfx()
 	if (!do_pal_step || !vks_is_frame_recording())
 		return;
 	float r = last_r, g = last_g, b = last_b;
-	VkPipeline pipeline;
-	if (last_r <= 0 && last_g <= 0 && last_b <= 0)
+	const bool darken = last_r <= 0 && last_g <= 0 && last_b <= 0;
+	if (darken)
 	{
 		r = last_r * -2.5f;
 		g = last_g * -2.5f;
 		b = last_b * -2.5f;
-		pipeline = vk_2d_pipeline_darken;
 	}
-	else
-		pipeline = vk_2d_pipeline_additive;
 	const float w = static_cast<float>(last_width);
 	const float h = static_cast<float>(last_height);
 	const vks_vertex v[6] = {
@@ -246,7 +243,7 @@ static void vks_do_palfx()
 		{w, h, 0.f, 0.f, r, g, b, 1.f},
 		{0.f, h, 0.f, 0.f, r, g, b, 1.f},
 	};
-	if (!vks_prepare_2d(pipeline))
+	if (!vks_prepare_2d(darken ? vk_2d_pipeline_darken : vk_2d_pipeline_additive))
 		return;
 	vks_emit(vk_white_descriptor_set, v, 6);
 }
