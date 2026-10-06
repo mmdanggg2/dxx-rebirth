@@ -827,6 +827,26 @@ static void vks_init_font(grs_font *const font)
 			{
 				for (const auto x : xrange(w))
 					font->ft_parent_bitmap.get_bitmap_data()[curx+x+(cury+y)*tw] = fp[x+y*w];
+				/* As ogl_init_font: filtering blends the transparent gap into
+				 * the slider glyphs' edges, so their segments look
+				 * disconnected. Copy the edge column into the gap:
+				 * 99 SLIDER_LEFT and 102 SLIDER_MARKER to the right,
+				 * 100 SLIDER_RIGHT and 101 SLIDER_MIDDLE to the left. */
+				if (gap && i >= 99 && i <= 102)
+				{
+					std::size_t oi, ii;
+					if (i != 99 && i != 102)
+					{
+						oi = (curx + (cury + y) * tw) - 1;
+						ii = y * w;
+					}
+					else
+					{
+						oi = (curx + (w - 1) + (cury + y) * tw) + 1;
+						ii = (w - 1) + y * w;
+					}
+					font->ft_parent_bitmap.get_bitmap_data()[oi] = fp[ii];
+				}
 			}
 		}
 		else
