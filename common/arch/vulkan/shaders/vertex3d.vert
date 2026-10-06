@@ -8,10 +8,14 @@
  *
  *   ndc.xy = (pos.x / pos.z, -pos.y / pos.z)
  *
- * Vulkan y is downward, so the y term is negated. The depth is the standard
- * hyperbolic near/far mapping, [near,far] -> [0,1]:
+ * Vulkan y is downward, so the y term is negated. Clip-space z is the
+ * linear term of that frustum, [near,far] -> [0,far]:
  *
- *   depth = far * (z - near) / (z * (far - near))
+ *   clip.z = far * (z - near) / (far - near)
+ *
+ * so after the divide by w the depth is the standard hyperbolic mapping
+ * [near,far] -> [0,1]. Unlike dividing by z here, it stays finite for
+ * vertices in the eye plane (z == 0).
  *
  * Setting clip-space w = pos.z makes the hardware clip vertices with w <= 0
  * (i.e. z <= 0, behind the viewer) before the perspective divide, giving
@@ -28,9 +32,8 @@ const float near = 0.1;
 const float far = 5000.0;
 
 void main() {
-	float z = a_pos.z;
-	float depth = far * (z - near) / (z * (far - near));
-	gl_Position = vec4(a_pos.x, -a_pos.y, depth * z, z);
+	const float z = a_pos.z;
+	gl_Position = vec4(a_pos.x, -a_pos.y, far * (z - near) / (far - near), z);
 	v_uv = a_uv;
 	v_color = clamp(a_color, 0.0, 1.0);
 }
