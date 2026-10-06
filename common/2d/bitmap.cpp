@@ -142,13 +142,13 @@ grs_subbitmap_ptr gr_create_sub_bitmap(grs_bitmap &bm, uint16_t x, uint16_t y, u
 
 void gr_free_bitmap_data (grs_bitmap &bm) // TODO: virtulize
 {
-	if (auto &d = bm.bm_mdata)
-		d_free(d);
 #if DXX_USE_OGL
 	ogl_freebmtexture(bm);
 #elif DXX_USE_VULKAN
 	vks_freebmtexture(bm);
 #endif
+	if (auto &d = bm.bm_mdata)
+		d_free(d);
 }
 
 void gr_init_sub_bitmap(grs_bitmap &bm, grs_bitmap &bmParent, const uint16_t x, const uint16_t y, const uint16_t w, const uint16_t h)	// TODO: virtualize
